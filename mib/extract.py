@@ -202,6 +202,10 @@ class PacketEvidence:
     ocr_pages: int = 0
     note_from_ocr: bool = False
     risk_panel_missing: bool = False
+    # Printed on the biometric slip. Low confidence is what drives
+    # `illegible_biometrics`, so it carries signal about that flag even on
+    # packets where the flag line itself did not survive.
+    biometric_confidence: float | None = None
 
     def values(self, field_name: str) -> list[Observation]:
         """Observations for a field, most trusted first."""
@@ -331,6 +335,12 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                     ev.registry_status = extras["registry_status"]
                 if extras.get("waiver_code") and ev.waiver_code is None:
                     ev.waiver_code = extras["waiver_code"]
+                if extras.get("biometric_confidence") and ev.biometric_confidence is None:
+                    try:
+                        ev.biometric_confidence = min(
+                            100, int(extras["biometric_confidence"])) / 100.0
+                    except ValueError:
+                        pass
                 # A scanned adjudicator note is still the top evidence tier.
                 # Text-layer notes win if both exist.
                 if extras.get("note_finding") and ev.note_finding is None:
@@ -415,6 +425,10 @@ def _parse_inline_fields(ev: PacketEvidence, visible: list[Span], kind: str,
                 part = part.strip()
                 if part and part.lower() != "none":
                     ev.observed_flags.append(part)
+        elif target == "_biometric_confidence":
+            match = re.search(r"(\d{1,3})", value)
+            if match and ev.biometric_confidence is None:
+                ev.biometric_confidence = min(100, int(match.group(1))) / 100.0
         elif target.startswith("_"):
             continue
         else:

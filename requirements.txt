@@ -3,3 +3,6 @@ PyMuPDF==1.28.0
 pytesseract==0.3.13
 Pillow==12.3.0
 numpy==2.3.4
+# Learned adjudicator (EVALUATION.md permits candidate-trained models offline).
+scikit-learn==1.7.2
+joblib==1.5.2

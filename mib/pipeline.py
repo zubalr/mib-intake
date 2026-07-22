@@ -21,6 +21,7 @@ itself into approving a packet it could not read.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from mib.extract import (
@@ -31,9 +32,11 @@ from mib.extract import (
     PacketEvidence,
     parse_packet,
 )
+from mib.features import packet_features, refresh_temporal
 from mib.lexicon import Lexicon
 from mib.policy import (
     APPROVED,
+    decision_path,
     DENIED,
     NEEDS_REVIEW,
     UNKNOWN,
@@ -104,7 +107,17 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
     return flags
 
 
-def extract_packet(pdf_path: Path, lexicon: Lexicon) -> tuple[dict[str, str], Record, str | None]:
+@dataclass
+class Extraction:
+    """Everything phase 1 recovers from a packet, before any adjudication."""
+
+    printed: dict[str, str]
+    record: Record
+    note: str | None
+    features: dict[str, float]
+
+
+def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
     """Phase 1: read a packet into printable fields plus a policy Record.
 
     Deliberately does no adjudicating. The staleness rule needs a packet
@@ -194,18 +207,31 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> tuple[dict[str, str], Re
     note = ev.note_finding if ev.note_finding in (APPROVED, DENIED, NEEDS_REVIEW) else None
     printed["_injection"] = "1" if ev.injection_detected else ""
     printed["_damaged"] = ",".join(sorted(ev.damaged_fields))
-    return printed, record, note
+    feats = packet_features(ev, record)
+    return Extraction(printed=printed, record=record, note=note, features=feats)
 
 
 def finalize(printed: dict[str, str], record: Record, note: str | None,
-             calibration: Calibration) -> Prediction:
-    """Phase 2: adjudicate an already-extracted record. Microseconds, no I/O."""
+             calibration: Calibration, adjudicator=None,
+             features: dict[str, float] | None = None) -> Prediction:
+    """Phase 2: adjudicate an already-extracted record. Microseconds, no I/O.
+
+    `adjudicator` is the optional learned model. It only ever runs on cases the
+    hard rules do not already settle -- an adjudicator note states the finding
+    outright and was 217/217 correct, so no model gets to overrule it.
+    """
     if note is not None:
         adjudication = note
         # The note dictates the decision, so the meaningful confidence is how
         # often notes are right -- not an outcome distribution over paths.
         confidence = calibration.accuracy(ADJUDICATOR_NOTE_PATH, 0.95)
         path = ADJUDICATOR_NOTE_PATH
+    elif adjudicator is not None and features is not None:
+        # The staleness reference is only known now, so temporal features and
+        # the recorded decision path must be rebuilt before the model reads them.
+        adjudication, confidence, path = adjudicator.adjudicate(
+            refresh_temporal(features, record),
+            calibration.probs(decision_path(record)))
     else:
         adjudication, confidence, path = calibration.adjudicate(record)
 
@@ -232,7 +258,7 @@ def build_prediction(pdf_path: Path, lexicon: Lexicon,
                      calibration: Calibration,
                      reference_date: str | None = None) -> Prediction:
     """Single-packet convenience path (tests, debugging)."""
-    printed, record, note = extract_packet(pdf_path, lexicon)
+    ex = extract_packet(pdf_path, lexicon)
     if reference_date:
-        record.receipt_date = reference_date
-    return finalize(printed, record, note, calibration)
+        ex.record.receipt_date = reference_date
+    return finalize(ex.printed, ex.record, ex.note, calibration)

@@ -52,8 +52,8 @@ def extract_one(pdf: str):
     from the shipped pipeline, which silently mis-calibrates every path.
     """
     assert _LEX is not None
-    printed, record, note = extract_packet(Path(pdf), _LEX)
-    return record, note
+    ex = extract_packet(Path(pdf), _LEX)
+    return ex.record, ex.note
 
 
 def main() -> None:

@@ -38,13 +38,19 @@ PER_PDF_TIMEOUT_S = 55
 
 _LEXICON: Lexicon | None = None
 _CALIBRATION: Calibration | None = None
+_ADJUDICATOR = None
 
 
 def _worker_init() -> None:
     """Load shared read-only resources once per worker process."""
-    global _LEXICON, _CALIBRATION
+    global _LEXICON, _CALIBRATION, _ADJUDICATOR
     _LEXICON = Lexicon()
     _CALIBRATION = Calibration()
+    # Optional. If the artifact is missing or unreadable the run still completes
+    # on the hand-built paths rather than failing -- a model is an optimisation,
+    # not a dependency.
+    from mib.model import Adjudicator
+    _ADJUDICATOR = Adjudicator.try_load()
 
 
 def fallback_prediction(case_id: str, lexicon: Lexicon, calibration: Calibration,
@@ -92,9 +98,9 @@ def process_one(pdf_path_str: str) -> dict:
     signal.alarm(PER_PDF_TIMEOUT_S)
     try:
         from mib.pipeline import extract_packet
-        printed, record, note = extract_packet(pdf_path, _LEXICON)
-        return {"case_id": case_id, "printed": printed,
-                "record": record, "note": note, "failed": False}
+        ex = extract_packet(pdf_path, _LEXICON)
+        return {"case_id": case_id, "printed": ex.printed, "record": ex.record,
+                "note": ex.note, "features": ex.features, "failed": False}
     except BaseException as exc:  # noqa: BLE001 -- a dropped case is never correct
         print(f"[warn] {case_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
         if os.environ.get("MIB_DEBUG"):
@@ -247,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     good = [r for r in rows.values() if not r.get("failed")]
     reference = corpus_reference_date([r["record"] for r in good])
     print(f"[info] staleness reference date: {reference}", file=sys.stderr)
+    print(f"[info] adjudicator: "
+          f"{'model ' + str(_ADJUDICATOR.metadata.get('kind')) if _ADJUDICATOR else 'hand-built paths'}",
+          file=sys.stderr)
 
     final: dict[str, dict] = {}
     for case_id, row in rows.items():
@@ -258,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         if record.receipt_date is None:
             record.receipt_date = reference
         final[case_id] = finalize(
-            row["printed"], record, row["note"], _CALIBRATION).to_row()
+            row["printed"], record, row["note"], _CALIBRATION,
+            adjudicator=_ADJUDICATOR, features=row.get("features")).to_row()
     rows = final
 
     # Belt and braces: assert one row per input PDF before writing.

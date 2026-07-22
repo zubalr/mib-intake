@@ -248,6 +248,10 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
             extras["registry_status"] = value
         elif target == "_waiver_code":
             extras["waiver_code"] = value
+        elif target == "_biometric_confidence":
+            match = re.search(r"(\d{1,3})", value)
+            if match:
+                extras.setdefault("biometric_confidence", match.group(1))
         elif target.startswith("_"):
             continue
         elif target not in fields:
