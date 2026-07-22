@@ -38,7 +38,7 @@ from mib.extract import (
 from mib.policy import (
     DISQUALIFYING_FLAGS,
     REVIEW_FLAGS,
-    REVOKED_SPONSORS,
+    REVOKED_SPONSORS_PUBLIC,
     UNKNOWN,
     Record,
     decision_path,
@@ -53,7 +53,11 @@ VISA_CLASSES = ("XW-1", "XW-2", "DIP-1", "MED-3", "TRANSIT-7")
 FEE_STATES = ("paid", "waived", "unpaid", "unknown")
 
 def refresh_temporal(features: dict[str, float], record: Record) -> dict[str, float]:
-    """Recompute the features that depend on the corpus staleness reference.
+    """Recompute every feature that depends on corpus-level context.
+
+    Named for the staleness reference it originally handled; it now also covers
+    the corpus-derived revoked-sponsor set, which is discovered in the same
+    phase and has the same failure mode if left stale.
 
     Features are built in phase 1, per packet, but the staleness reference date
     is a *corpus-level* statistic only known in phase 2. Without this refresh,
@@ -68,6 +72,11 @@ def refresh_temporal(features: dict[str, float], record: Record) -> dict[str, fl
     for key in [k for k in features if k.startswith("path__")]:
         del features[key]
     features["path__" + decision_path(record)] = 1.0
+
+    # Revocation is now discovered from the corpus, so this cannot be computed
+    # in phase 1 -- exactly like the staleness features below.
+    features["sponsor_revoked"] = float(record.sponsor_id in REVOKED_SPONSORS_PUBLIC
+                                        or record.sponsor_revoked_in_packet)
 
     margin, known = 0.0, 0.0
     if record.arrival_date != UNKNOWN and record.receipt_date:
@@ -137,7 +146,9 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
 
     # -- Sponsor -----------------------------------------------------------
     feats["sponsor_known"] = float(record.sponsor_id != UNKNOWN)
-    feats["sponsor_revoked"] = float(record.sponsor_id in REVOKED_SPONSORS
+    # Placeholder: recomputed by `refresh_temporal` once the corpus-derived
+    # revoked set exists. Phase 1 cannot know it.
+    feats["sponsor_revoked"] = float(record.sponsor_id in REVOKED_SPONSORS_PUBLIC
                                      or record.sponsor_revoked_in_packet)
     feats["sponsor_mismatch_seen"] = float(
         bool(ev.sponsor_letter_sponsor)

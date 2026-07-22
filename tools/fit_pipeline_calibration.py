@@ -33,7 +33,7 @@ from mib.cli import corpus_reference_date
 from mib.pipeline import ADJUDICATOR_NOTE_PATH, extract_packet
 from mib.policy import (
     APPROVED, DENIED, NEEDS_REVIEW, OUTCOMES, UNKNOWN, UNREADABLE_PATH,
-    Record, apply_reference_date, decide, decision_path,
+    Record, apply_reference_date, corpus_revoked_sponsors, decide, decision_path,
 )
 
 PRIOR_STRENGTH = 4.0
@@ -89,13 +89,15 @@ def main() -> None:
 
     # Same corpus-derived staleness reference the CLI uses at scoring time.
     reference = corpus_reference_date([r for r, _ in results])
+    revoked = corpus_revoked_sponsors([r for r, _ in results])
     print(f"staleness reference date: {reference}")
+    print(f"corpus-derived revoked sponsors: {sorted(revoked)}")
 
     counts: dict[str, Counter] = defaultdict(Counter)
     note_correct = note_total = 0
     for case_id, (record, note) in zip(case_ids, results):
         t = truth[case_id]
-        apply_reference_date(record, reference)
+        apply_reference_date(record, reference, revoked)
         path = ADJUDICATOR_NOTE_PATH if note is not None else decision_path(record)
         counts[path][t] += 1
         if note is not None:

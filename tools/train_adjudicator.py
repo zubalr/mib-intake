@@ -41,7 +41,7 @@ from sklearn.preprocessing import StandardScaler
 
 from mib.model import Adjudicator
 from mib.policy import (OUTCOMES, PAYOFF, Calibration, apply_reference_date,
-                        decide, decision_path)
+                        corpus_revoked_sponsors, decide, decision_path)
 from tools.build_cache import load_cache
 
 CLASSIFICATION_POINTS = 80.0
@@ -153,9 +153,10 @@ def main() -> None:
     from mib.cli import corpus_reference_date
     from mib.features import refresh_temporal
     reference = corpus_reference_date([r["record"] for r in rows])
-    print(f"staleness reference: {reference}")
+    revoked = corpus_revoked_sponsors([r["record"] for r in rows])
+    print(f"staleness reference: {reference}   revoked sponsors: {len(revoked)}")
     for row in rows:
-        apply_reference_date(row["record"], reference)
+        apply_reference_date(row["record"], reference, revoked)
         refresh_temporal(row["features"], row["record"])
 
     # The model only ever runs where no note settled the case.
@@ -357,7 +358,8 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
             out.append(fallback_prediction(row["case_id"], lexicon, calibration,
                                            row.get("reason", "?")).to_row())
             continue
-        record = apply_reference_date(row["record"], reference)
+        record = apply_reference_date(row["record"], reference,
+                                      corpus_revoked_sponsors([r["record"] for r in rows]))
         probs = by_case.get(row["case_id"])
         if probs is None:
             # Note-settled: decided by rule, no model involved.

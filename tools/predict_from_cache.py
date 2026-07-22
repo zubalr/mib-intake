@@ -23,7 +23,7 @@ from pathlib import Path
 
 from mib.cli import _enforce_output_schema, corpus_reference_date, fallback_prediction
 from mib.lexicon import Lexicon
-from mib.policy import Calibration, apply_reference_date
+from mib.policy import Calibration, apply_reference_date, corpus_revoked_sponsors
 from mib.pipeline import finalize
 from tools.build_cache import load_cache
 
@@ -33,6 +33,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
     rows = cache["rows"]
     good = [r for r in rows if not r["failed"]]
     reference = corpus_reference_date([r["record"] for r in good])
+    revoked = corpus_revoked_sponsors([r["record"] for r in good])
 
     out: list[dict] = []
     for row in rows:
@@ -40,7 +41,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
             out.append(fallback_prediction(
                 row["case_id"], lexicon, calibration, row.get("reason", "?")).to_row())
             continue
-        record = apply_reference_date(row["record"], reference)
+        record = apply_reference_date(row["record"], reference, revoked)
         prediction = finalize(row["printed"], record, row["note"], calibration,
                               adjudicator=adjudicator, features=row.get("features"))
         out.append(prediction.to_row())

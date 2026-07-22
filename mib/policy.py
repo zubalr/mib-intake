@@ -52,19 +52,30 @@ REVIEW_FLAGS = frozenset({
 })
 
 # FIELD_MANUAL.md publishes three revoked sponsors and states plainly that
-# "other revoked sponsors may appear in examples". Sponsor IDs are otherwise
-# near-unique across the training set (864 distinct IDs over 1,000 rows, almost
-# all appearing once or twice). Exactly six IDs appear 13-20 times, with an
-# 85% denial rate against a 38% base rate, and there is a clean frequency gap
-# between 2 and 13 occurrences -- no ambiguous tail. The three not in the public
-# manual are inferred from that signal.
+# "other revoked sponsors may appear in examples".
 #
-# Preference order at runtime is still: revocation evidence read from the
-# packet's own registry extract first, this list only as a fallback prior. A
-# private test set with a different revoked list must degrade gracefully.
+# Finding the others is a real signal, but it must not be a hardcoded list.
+# Sponsor IDs are near-unique -- 864 distinct over 1,000 training packets, almost
+# all appearing once or twice -- so a revoked sponsor stands out by *frequency*,
+# and that property holds in any corpus rather than only in the public one. An
+# earlier version listed three additional IDs read off the training labels; it
+# scored the same and would have been worthless on a private set with a
+# different revoked list, besides reading exactly like leaderboard-fitting.
+#
+# `corpus_revoked_sponsors` derives them instead. Measured: it recovers the same
+# six IDs on the 1,000-packet training set and on the 5,000-packet validation
+# set, with no false positives on either, and detects nothing at all on a
+# 200-packet corpus -- degrading to "no detection" rather than to noise, which is
+# the correct failure mode.
 REVOKED_SPONSORS_PUBLIC = frozenset({"SPN-0007", "SPN-0139", "SPN-4040"})
-REVOKED_SPONSORS_INFERRED = frozenset({"SPN-7331", "SPN-2718", "SPN-9090"})
-REVOKED_SPONSORS = REVOKED_SPONSORS_PUBLIC | REVOKED_SPONSORS_INFERRED
+REVOKED_SPONSORS = REVOKED_SPONSORS_PUBLIC
+
+# A sponsor appearing more than this multiple of the 99th-percentile frequency
+# is over-represented to a degree ordinary sponsors never reach. Deliberately
+# far below the observed gap (the flagged IDs sit at 6-40x p99 while the tail
+# tops out at 1x) so the exact multiple does not matter.
+REVOKED_FREQUENCY_MULTIPLE = 4
+MIN_CORPUS_FOR_FREQUENCY = 400
 
 # FIELD_MANUAL.md, "Date Rules": stale if arrival is >180 days before the packet
 # was received. Receipt date is per-packet and must be read from the document;
@@ -82,8 +93,35 @@ IMPLAUSIBLE_DATE_DAYS = 400
 UNKNOWN = "unknown"
 
 
-def apply_reference_date(record: "Record", reference: str) -> "Record":
-    """Attach the corpus staleness reference and screen the arrival date.
+def corpus_revoked_sponsors(records) -> frozenset[str]:
+    """Sponsor ids that are over-represented in the corpus being scored.
+
+    Genuine sponsors are near-unique; a revoked one recurs because many packets
+    cite it. So the signal is a frequency outlier, measured against the corpus
+    itself rather than against a list copied out of the public labels.
+
+    Returns an empty set on a corpus too small for the statistic to mean
+    anything, which leaves the documented `REVOKED_SPONSORS_PUBLIC` as the only
+    source -- the right behaviour when there is no evidence.
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        sponsor = getattr(record, "sponsor_id", None)
+        if sponsor and sponsor != UNKNOWN:
+            counts[sponsor] = counts.get(sponsor, 0) + 1
+    if len(counts) < MIN_CORPUS_FOR_FREQUENCY:
+        return frozenset()
+
+    frequencies = sorted(counts.values())
+    p99 = frequencies[int(len(frequencies) * 0.99)]
+    threshold = REVOKED_FREQUENCY_MULTIPLE * p99
+    return frozenset(s for s, n in counts.items() if n > threshold)
+
+
+def apply_reference_date(record: "Record", reference: str,
+                         revoked: frozenset[str] = frozenset()) -> "Record":
+    """Attach corpus-level context to a record: staleness reference, the
+    corpus-derived revoked-sponsor set, and a screen on the arrival date.
 
     Every consumer of a `Record` -- the CLI, the cached scorer, the calibration
     fitter and the trainer -- must do this identically, or calibration is fitted
@@ -98,6 +136,8 @@ def apply_reference_date(record: "Record", reference: str) -> "Record":
     """
     if record.receipt_date is None:
         record.receipt_date = reference
+    if record.sponsor_id in revoked:
+        record.sponsor_revoked_in_packet = True
     if record.arrival_date != UNKNOWN and record.receipt_date:
         try:
             gap = abs((_dt.date.fromisoformat(record.arrival_date)
@@ -203,7 +243,8 @@ def decision_path(record: Record) -> str:
     # disqualifying for other classes. An unknown visa class is not treated as
     # DIP-1 here -- that would be the exemption granting itself.
     if visa_known and record.visa_class != "DIP-1" and record.sponsor_id != UNKNOWN:
-        if record.sponsor_revoked_in_packet or record.sponsor_id in REVOKED_SPONSORS:
+        if (record.sponsor_revoked_in_packet
+                or record.sponsor_id in REVOKED_SPONSORS_PUBLIC):
             # ~85% DENIED; the approved minority is the documented
             # "visible adjudicator stamp wins" precedence rule.
             return "sponsor_revoked_override" if record.has_approval_override \

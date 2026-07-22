@@ -28,7 +28,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from mib.lexicon import Lexicon
-from mib.policy import UNREADABLE_PATH, Calibration, apply_reference_date, decide
+from mib.policy import (UNREADABLE_PATH, Calibration, apply_reference_date,
+                        corpus_revoked_sponsors, decide)
 from mib.schema import Prediction, write_jsonl
 
 # Per-PDF wall-clock ceiling. The budget is 6 s/PDF *averaged* over the set, so
@@ -273,7 +274,9 @@ def main(argv: list[str] | None = None) -> int:
 
     good = [r for r in rows.values() if not r.get("failed")]
     reference = corpus_reference_date([r["record"] for r in good])
+    revoked = corpus_revoked_sponsors([r["record"] for r in good])
     print(f"[info] staleness reference date: {reference}", file=sys.stderr)
+    print(f"[info] corpus-derived revoked sponsors: {sorted(revoked)}", file=sys.stderr)
     print(f"[info] adjudicator: "
           f"{'model ' + str(_ADJUDICATOR.metadata.get('kind')) if _ADJUDICATOR else 'hand-built paths'}",
           file=sys.stderr)
@@ -284,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
             final[case_id] = fallback_prediction(
                 case_id, _LEXICON, _CALIBRATION, row.get("reason", "?")).to_row()
             continue
-        record = apply_reference_date(row["record"], reference)
+        record = apply_reference_date(row["record"], reference, revoked)
         final[case_id] = finalize(
             row["printed"], record, row["note"], _CALIBRATION,
             adjudicator=_ADJUDICATOR, features=row.get("features")).to_row()
