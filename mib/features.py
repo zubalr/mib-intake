@@ -122,6 +122,7 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
         feats[f"flag_{flag}"] = float(flag in flags)
     feats["risk_flags_known"] = float(record.risk_flags_known)
     feats["risk_panel_missing"] = float(ev.risk_panel_missing)
+    feats["risk_panel_read"] = float(ev.risk_panel_read)
     # -1 encodes "not printed", which is distinct from a genuine low score.
     feats["biometric_confidence"] = (
         ev.biometric_confidence if ev.biometric_confidence is not None else -1.0)

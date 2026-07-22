@@ -124,6 +124,10 @@ _NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]
 #       "adjudication=" is far too long to bridge the 4-character gap.
 _NOTE_LOOSE_RE = re.compile(
     r"\bF\w{2,8}\W{0,4}(APPROVED|DENIED|NEEDS[\s_\-]?REVIEW)\b", re.I)
+
+# "FORM B-13: Biometric Scan Slip" as it survives OCR. The hyphen and colon are
+# routinely lost or substituted, so only the distinctive parts are required.
+_B13_TITLE_RE = re.compile(r"B\s*[-—._]?\s*13\b|Biometric\s+Scan", re.I)
 # "Disqualifying risk flag: biohazard_red." / "Review-only risk flag present: x."
 _NOTE_FLAG_RE = re.compile(r"risk flag(?:\s+present)?\s*[:;.]\s*([a-z_]+)", re.I)
 
@@ -359,6 +363,12 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
     # note -- the top evidence tier, and 162/162 correct wherever the text layer
     # carried one. Its stated reason also names the governing risk flag, which
     # is often the only place that flag survives on a damaged packet.
+    # A scanned biometric slip is the page that carries the risk panel. It is
+    # typed SCANNED rather than BIOMETRIC (its title is pixels, not a text
+    # span), so without this the packet looks like it has no risk page at all.
+    if _B13_TITLE_RE.search(text):
+        extras["risk_panel_read"] = "1"
+
     note = _NOTE_RE.search(text)
     if note:
         finding = note.group(1).upper().strip(" .")
@@ -392,6 +402,12 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
             continue
 
         if target == "_observed_flags":
+            # Record that the risk panel was *read*, separately from what it
+            # said. "Observed flags: none" is positive evidence of no flags;
+            # discarding it because the flag list came back empty made a read
+            # page indistinguishable from an unread one, which is precisely the
+            # distinction that governs false approvals.
+            extras["risk_panel_read"] = "1"
             for part in re.split(r"[,;|]", value):
                 part = part.strip()
                 if part and part.lower() != "none":

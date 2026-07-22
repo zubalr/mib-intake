@@ -202,6 +202,10 @@ class PacketEvidence:
     ocr_pages: int = 0
     note_from_ocr: bool = False
     risk_panel_missing: bool = False
+    # The risk panel was read, independently of whether it listed any flags.
+    # "Observed flags: none" is evidence of no flags; a page we never read is
+    # not. Conflating the two is what produced the original false approvals.
+    risk_panel_read: bool = False
     # Printed on the biometric slip. Low confidence is what drives
     # `illegible_biometrics`, so it carries signal about that flag even on
     # packets where the flag line itself did not survive.
@@ -365,6 +369,8 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                         ev.note_from_ocr = True
                     # An explicitly missing risk panel is unread evidence, not
                     # "no flags" -- the distinction that governs false approvals.
+                    if extras.get("risk_panel_read"):
+                        ev.risk_panel_read = True
                     if "RISK PANEL MISSING" in text.upper():
                         ev.risk_panel_missing = True
 

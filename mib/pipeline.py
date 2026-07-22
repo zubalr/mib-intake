@@ -239,8 +239,13 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
     # biohazard, active warrants or memory tampering. It was silently marking
     # flags "known" on 14 of the 21 remaining false approvals -- packets that
     # carried no risk page whatsoever.
+    # `ev.risk_panel_read` covers the scanned case: a biometric slip that
+    # exists only as a raster is typed SCANNED, never BIOMETRIC, so a packet
+    # whose risk panel OCR'd cleanly as "Observed flags: none" was being treated
+    # as though its risk page had never been seen.
     flags_known = (bool(flags)
                    or BIOMETRIC in ev.page_types
+                   or ev.risk_panel_read
                    or ev.note_finding is not None) and not ev.risk_panel_missing
 
     waiver = (ev.waiver_code or "").upper()
