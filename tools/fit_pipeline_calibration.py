@@ -33,7 +33,7 @@ from mib.cli import corpus_reference_date
 from mib.pipeline import ADJUDICATOR_NOTE_PATH, extract_packet
 from mib.policy import (
     APPROVED, DENIED, NEEDS_REVIEW, OUTCOMES, UNKNOWN, UNREADABLE_PATH,
-    Record, decide, decision_path,
+    Record, apply_reference_date, decide, decision_path,
 )
 
 PRIOR_STRENGTH = 4.0
@@ -95,8 +95,7 @@ def main() -> None:
     note_correct = note_total = 0
     for case_id, (record, note) in zip(case_ids, results):
         t = truth[case_id]
-        if record.receipt_date is None:
-            record.receipt_date = reference
+        apply_reference_date(record, reference)
         path = ADJUDICATOR_NOTE_PATH if note is not None else decision_path(record)
         counts[path][t] += 1
         if note is not None:

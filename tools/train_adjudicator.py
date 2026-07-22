@@ -40,7 +40,8 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from mib.model import Adjudicator
-from mib.policy import OUTCOMES, PAYOFF, Calibration, decide, decision_path
+from mib.policy import (OUTCOMES, PAYOFF, Calibration, apply_reference_date,
+                        decide, decision_path)
 from tools.build_cache import load_cache
 
 CLASSIFICATION_POINTS = 80.0
@@ -154,8 +155,7 @@ def main() -> None:
     reference = corpus_reference_date([r["record"] for r in rows])
     print(f"staleness reference: {reference}")
     for row in rows:
-        if row["record"].receipt_date is None:
-            row["record"].receipt_date = reference
+        apply_reference_date(row["record"], reference)
         refresh_temporal(row["features"], row["record"])
 
     # The model only ever runs where no note settled the case.
@@ -357,9 +357,7 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
             out.append(fallback_prediction(row["case_id"], lexicon, calibration,
                                            row.get("reason", "?")).to_row())
             continue
-        record = row["record"]
-        if record.receipt_date is None:
-            record.receipt_date = reference
+        record = apply_reference_date(row["record"], reference)
         probs = by_case.get(row["case_id"])
         if probs is None:
             # Note-settled: decided by rule, no model involved.

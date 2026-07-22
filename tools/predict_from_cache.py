@@ -23,7 +23,7 @@ from pathlib import Path
 
 from mib.cli import _enforce_output_schema, corpus_reference_date, fallback_prediction
 from mib.lexicon import Lexicon
-from mib.policy import Calibration
+from mib.policy import Calibration, apply_reference_date
 from mib.pipeline import finalize
 from tools.build_cache import load_cache
 
@@ -40,9 +40,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
             out.append(fallback_prediction(
                 row["case_id"], lexicon, calibration, row.get("reason", "?")).to_row())
             continue
-        record = row["record"]
-        if record.receipt_date is None:
-            record.receipt_date = reference
+        record = apply_reference_date(row["record"], reference)
         prediction = finalize(row["printed"], record, row["note"], calibration,
                               adjudicator=adjudicator, features=row.get("features"))
         out.append(prediction.to_row())

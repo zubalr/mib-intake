@@ -71,7 +71,42 @@ REVOKED_SPONSORS = REVOKED_SPONSORS_PUBLIC | REVOKED_SPONSORS_INFERRED
 # this constant is only the fallback when it cannot be found.
 STALE_DAYS = 180
 
+# How far an arrival date may sit from the corpus reference before it stops
+# counting as credible evidence. Arrival dates within one corpus cluster within
+# months of each other, so a date years away is an OCR digit error -- `6` and
+# `8` collide, and "2026" reads as "2028" on 30 of 1,000 training packets --
+# rather than a genuine outlier. The window is deliberately generous so a corpus
+# that legitimately spans a wide range is left alone.
+IMPLAUSIBLE_DATE_DAYS = 400
+
 UNKNOWN = "unknown"
+
+
+def apply_reference_date(record: "Record", reference: str) -> "Record":
+    """Attach the corpus staleness reference and screen the arrival date.
+
+    Every consumer of a `Record` -- the CLI, the cached scorer, the calibration
+    fitter and the trainer -- must do this identically, or calibration is fitted
+    on different decision paths than the pipeline takes. Hence one function
+    rather than four copies of two lines.
+
+    The screen: an arrival date sitting years away from every other date in the
+    corpus is a misread, not evidence. We cannot recover the true value, since
+    the failure is a single digit, but we can stop treating it as readable --
+    otherwise a bogus *future* date produces a negative staleness margin and
+    makes a stale packet look fresh.
+    """
+    if record.receipt_date is None:
+        record.receipt_date = reference
+    if record.arrival_date != UNKNOWN and record.receipt_date:
+        try:
+            gap = abs((_dt.date.fromisoformat(record.arrival_date)
+                       - _dt.date.fromisoformat(record.receipt_date)).days)
+            if gap > IMPLAUSIBLE_DATE_DAYS:
+                record.arrival_date_untrusted = True
+        except (ValueError, TypeError):
+            pass
+    return record
 
 
 @dataclass

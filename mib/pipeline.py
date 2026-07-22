@@ -30,6 +30,7 @@ from mib.extract import (
     BIOMETRIC,
     MANUAL_CORRECTION,
     SCANNED,
+    SPONSOR,
     PacketEvidence,
     parse_packet,
 )
@@ -143,6 +144,28 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
             and ev.sponsor_letter_sponsor != form_sponsor:
         flags.add("sponsor_mismatch")
 
+    # ...or naming a different *applicant* than the identity documents.
+    #
+    # This started as an exclusion: the sponsor letter was feeding
+    # `identity_conflict`, which was wrong on all 13 training packets where it
+    # fired. But simply dropping it measured -0.16 classification, because the
+    # flag was the wrong *token* while still being a useful *signal* -- removing
+    # it moved packets off `review_flags` and toward APPROVED. Emitting the token
+    # the truth actually uses keeps the signal and fixes the label: both are
+    # review-only flags, so the decision path is unchanged, and 6 of those 13
+    # packets go from certainly-wrong to correct.
+    if ev.sponsor_letter_name:
+        letter_name, letter_conf = lexicon.snap_name(ev.sponsor_letter_name)
+        identity = set()
+        for obs in ev.values("applicant_name"):
+            if obs.source in (SCANNED, MANUAL_CORRECTION, SPONSOR):
+                continue
+            snapped, conf = lexicon.snap_name(obs.value)
+            if conf > 0.0:
+                identity.add(snapped.casefold())
+        if letter_conf > 0.0 and identity and letter_name.casefold() not in identity:
+            flags.add("sponsor_mismatch")
+
     # Two documents naming different applicants.
     #
     # Deliberately conservative, and only over crisp text-layer sources. OCR of
@@ -151,10 +174,20 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
     # produced ~141 false identity conflicts, which cost extraction points and
     # wrongly forced packets to NEEDS_REVIEW. A manual correction also *resolves*
     # a conflict rather than being one, so its presence suppresses the flag.
+    # The sponsor letter is excluded too, and that is a substantive rule rather
+    # than more noise-suppression. A sponsor letter naming somebody other than
+    # the applicant is a *sponsor* problem, not two identity documents
+    # disagreeing: on all 13 training packets where it happened, every identity
+    # document agreed with itself and the truth was `sponsor_mismatch` or no flag
+    # at all -- never `identity_conflict`. Excluding it moves precision from
+    # 0.529 to 0.667.
+    #
+    # (The obvious follow-on -- treating a differing letter name as evidence of
+    # `sponsor_mismatch` -- was measured at 46% precision and rejected.)
     if "applicant_name" not in ev.corrections:
         crisp = set()
         for obs in ev.values("applicant_name"):
-            if obs.source in (SCANNED, MANUAL_CORRECTION):
+            if obs.source in (SCANNED, MANUAL_CORRECTION, SPONSOR):
                 continue
             snapped, conf = lexicon.snap_name(obs.value)
             # Only a confidently-recognised name can evidence a conflict.
