@@ -171,7 +171,7 @@ private extraction score should read *higher* than 43.73.
 
 ## Runtime and reproducibility
 
-Measured, not projected: 5,000 packets in **2 h 18 m** — **1.66 s/PDF** against a
+Measured, not projected: 5,000 packets in **2 h 15 m** — **1.62 s/PDF** against a
 6 s budget — under the real flags (`--network none --cpus 4 --memory 8g
 --read-only --tmpfs /tmp`). 5,000 valid records, 0 missing, validator exits 0.
 Image 1.19 GB (limit 4 GiB), model artifact 112 KB (limit 250 MiB). No network, no LLM
