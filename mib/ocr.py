@@ -142,6 +142,50 @@ _FINDING_BLOCKLIST = frozenset({
 _FINDING_MAX_RATIO = 0.35
 
 
+# When the finding word itself is destroyed but the reason clause survives, the
+# reason states the governing rationale -- and the rationale determines the
+# outcome. Measured over the 319 notes we can already read, each of these
+# openings maps to one finding with the purity shown:
+#
+#   "Disqualifying risk flag: ..."          DENIED         32/32
+#   "Clean or exception-qualified packet"   APPROVED       28/28
+#   "Transit class cannot authorize ..."    DENIED         12/12
+#   "Denial supported by ..."               DENIED         11/11
+#   "Arrival date missing from trusted ..." NEEDS_REVIEW   10/10
+#   "Packet contains damaged or contra..."  NEEDS_REVIEW     8/8
+#   "Review-only risk flag present: ..."    NEEDS_REVIEW   27/29
+#   "Approval supported by ..."             APPROVED         5/5
+#
+# This is still reading the signed note -- the top evidence tier -- just a
+# different sentence of it. Anchored on the distinctive words rather than the
+# whole phrase, since OCR eats the rest, and only consulted when no finding word
+# could be read at all.
+_REASON_FINDINGS = (
+    (re.compile(r"(?i)d[il]squal[il]f"), "DENIED"),
+    (re.compile(r"(?i)trans[il]t\s+class"), "DENIED"),
+    (re.compile(r"(?i)den[il]a[li]\s+supp"), "DENIED"),
+    (re.compile(r"(?i)revoked\s+spon"), "DENIED"),
+    (re.compile(r"(?i)clean\s+or\s+except"), "APPROVED"),
+    (re.compile(r"(?i)approva[li]\s+supp"), "APPROVED"),
+    (re.compile(r"(?i)rev[il]ew[\s\-]?only"), "NEEDS_REVIEW"),
+    (re.compile(r"(?i)arr[il]va[li]\s+date\s+m[il]ss"), "NEEDS_REVIEW"),
+    (re.compile(r"(?i)damaged\s+or\s+contra"), "NEEDS_REVIEW"),
+)
+# Only trust the reason clause on a page that is actually an adjudicator note.
+# These phrases are distinctive, but scoping them to the note page keeps the
+# rule from firing on prose that happens to mention a disqualifying flag.
+_NOTE_PAGE_CUE = re.compile(r"(?i)adjud|manua[li]\s*n|reason\s*[:;.]")
+
+
+def _finding_from_reason(text: str) -> str | None:
+    """Infer the finding from the note's reason clause, or None."""
+    if not _NOTE_PAGE_CUE.search(text):
+        return None
+    hits = {finding for pattern, finding in _REASON_FINDINGS if pattern.search(text)}
+    # A reason naming two different rationales is not a reason we understand.
+    return hits.pop() if len(hits) == 1 else None
+
+
 def _snap_finding(token: str) -> str | None:
     """Nearest adjudication outcome to a garbled finding word, or None.
 
@@ -453,6 +497,11 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
                 extras["note_finding"] = finding
                 extras["note_reason"] = ""
                 break
+    if "note_finding" not in extras and "SAMPLE" not in text.upper():
+        finding = _finding_from_reason(text)
+        if finding:
+            extras["note_finding"] = finding
+            extras["note_reason"] = ""
     for match in _NOTE_FLAG_RE.finditer(text):
         flags.append(match.group(1).strip(" ."))
     for match in _FLAG_LITERAL_RE.finditer(text):
