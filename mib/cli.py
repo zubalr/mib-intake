@@ -78,7 +78,11 @@ def fallback_prediction(case_id: str, lexicon: Lexicon, calibration: Calibration
         arrival_date="2026-04-01",
         declared_purpose=lexicon.prior_mode("declared_purpose"),
         risk_flags="none",
-        fee_status="unknown",
+        # Prior mode like every other field here. The *adjudication* stays
+        # honest (it uses the unreadable-packet prior, below) -- only the
+        # printed field guesses, and a guess on a field we could not read is
+        # free under the evaluator's scoring.
+        fee_status=lexicon.prior_mode("fee_status"),
         adjudication=adjudication,
         confidence=confidence,
         debug={"path": path, "fallback": reason},

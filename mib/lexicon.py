@@ -220,7 +220,17 @@ class Lexicon:
     def review_flags(self) -> set[str]:
         return set(self.data["risk_flags"]["review_only"])
 
-    def snap_flag(self, observed: str, max_ratio: float = 0.3) -> tuple[str, float]:
+    def snap_flag(self, observed: str, max_ratio: float = 0.3,
+                  allow_truncation: bool = False) -> tuple[str, float]:
+        """Snap one observed token onto the risk-flag vocabulary.
+
+        `allow_truncation` relaxes the prefix rule and must only be set where
+        *context already guarantees the token is a flag* -- i.e. it came from
+        the value side of an ``Observed flags:`` label. In free text the relaxed
+        rule is unsafe: a bare ``Sponsor`` from "Sponsor ID: SPN-4040" snaps to
+        `sponsor_mismatch` with confidence 0.47, which would invent a risk flag
+        out of an ordinary field label.
+        """
         all_flags = tuple(sorted(self.disqualifying_flags | self.review_flags))
         value, conf = self._snap_to(all_flags, observed, max_ratio)
         if conf > 0.0:
@@ -236,4 +246,25 @@ class Lexicon:
             matches = [f for f in all_flags if _canon(f).startswith(obs)]
             if len(matches) == 1:
                 return matches[0], min(0.75, len(obs) / len(_canon(matches[0])))
+
+        # Shorter, and possibly misspelled, truncations. Scans clip the flag
+        # column hard: "resc" for rescinded_denial, "ifle" for
+        # illegible_biometrics -- the latter both truncated *and* misread, so an
+        # exact-prefix test cannot reach it. All eight flags are distinguishable
+        # by their first three characters, so a fuzzy prefix stays unambiguous;
+        # a near-tie is rejected outright, because a confidently wrong flag is
+        # worse than none.
+        if allow_truncation and len(obs) >= 3:
+            scored = []
+            for flag in all_flags:
+                canon = _canon(flag)
+                if len(obs) > len(canon):
+                    continue
+                scored.append((weighted_distance(obs, canon[: len(obs)]), flag))
+            scored = [s for s in sorted(scored) if s[0] <= 1.0]
+            if scored and (len(scored) == 1 or scored[1][0] - scored[0][0] >= 0.5):
+                distance, flag = scored[0]
+                ratio = len(obs) / len(_canon(flag))
+                return flag, min(0.7, ratio * (1.0 - distance) + 0.25)
+
         return value, conf

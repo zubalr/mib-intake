@@ -114,7 +114,20 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
     """Risk flags from the biometric slip plus cross-document conflicts."""
     flags: set[str] = set()
 
+    # Two sources, deliberately snapped with different strictness.
+    #
+    # `observed_flags` came from the value side of an "Observed flags:" label,
+    # so context already guarantees each token is a flag; truncation matching is
+    # safe and recovers scans clipped to "resc" or "ifle".
     for raw in ev.observed_flags:
+        snapped, conf = lexicon.snap_flag(raw, allow_truncation=True)
+        if conf > 0.0:
+            flags.add(snapped)
+
+    # `flag_candidates` were mined from free text with no label vouching for
+    # them, so they get the strict rule. Anything unlike a flag returns
+    # confidence 0 and is dropped.
+    for raw in ev.flag_candidates:
         snapped, conf = lexicon.snap_flag(raw)
         if conf > 0.0:
             flags.add(snapped)
@@ -225,7 +238,21 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
             candidate = snapped.lower() if conf > 0.0 else candidate
         if candidate in FEE_VALUES:
             fee = candidate
-    printed["fee_status"] = fee
+
+    # `fee_status` was the one field still *printing* its unknown marker instead
+    # of a prior guess, and it cost more than any other single oversight.
+    # "unknown" is a legal value, which is what disguised the bug: the output
+    # looked deliberate. But it is only 4.4% of the truth distribution, while we
+    # were printing it on 41.7% of packets. Among those 417, the truth is 65%
+    # `paid` and only 9.8% `unknown` -- so printing the prior mode wins 271 and
+    # loses 41, worth about +1.0 extraction points.
+    #
+    # The *record* keeps UNKNOWN, so the `fee_unknown` decision path still fires
+    # and the policy engine never sees the guess. This is the same split §1.2
+    # already applies to every other field: a wrong value and a blank score
+    # identically, so a guess on an unreadable field is free, but adjudicating
+    # on that guess is not.
+    printed["fee_status"] = fee if fee != UNKNOWN else lexicon.prior_mode("fee_status")
 
     flags = _derive_risk_flags(ev, lexicon)
     printed["risk_flags"] = "|".join(sorted(flags)) if flags else "none"

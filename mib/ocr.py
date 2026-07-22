@@ -146,6 +146,26 @@ _FLAG_LITERALS = (
 _FLAG_LITERAL_RE = re.compile(
     "|".join(name.replace("_", r"[_\s\-]?") for name in _FLAG_LITERALS), re.I)
 
+# Near-misses the literal scan cannot reach, because it requires the flag name
+# to survive OCR intact. Real examples from packets whose truth carried the
+# flag: "ilegible_biometrine", "Kientity_confilct", "sponser_mismatch". Each is
+# one or two glyphs from correct and each was being thrown away whole.
+#
+# `illegible_biometrics` alone was missed on 111 of 1,000 packets -- the single
+# largest extraction loss in the corpus, because `risk_flags` carries 8 raw
+# points, more than any other field.
+#
+# Restricted to **underscore-joined pairs** and never bare words. That is not
+# cosmetic: measured against 25 real non-flag tokens from these pages, pair-only
+# mining produced zero false positives, while allowing bare words made
+# ``Sponsor`` (from "Sponsor ID: SPN-4040") snap to `sponsor_mismatch` at
+# confidence 0.47. Inventing a risk flag is expensive twice over -- it loses the
+# 8-point field and can force a wrong DENIED through the disqualifying path.
+#
+# These are emitted as *candidates*; `mib.lexicon.snap_flag` arbitrates, and
+# anything that does not resemble a flag is dropped with confidence 0.
+_FLAG_CANDIDATE_RE = re.compile(r"\b[A-Za-z]{3,}_[A-Za-z]{2,}\b")
+
 # Page furniture OCR sweeps into a value when it sits on the same scan line.
 # Left in place it turns "Solix Solquell" into "Solix Solquell SCAN IMAGE",
 # which then reads as an identity conflict against the crisp text layer.
@@ -199,6 +219,16 @@ def _to_digits(token: str) -> str | None:
     """Repair a token that should be all digits, or None if it cannot be."""
     fixed = token.translate(_DIGIT_REPAIR)
     return fixed if fixed.isdigit() else None
+
+
+def mine_flag_candidates(text: str) -> list[str]:
+    """Flag-shaped tokens found anywhere in `text`, for the caller to arbitrate.
+
+    Deliberately returns raw tokens rather than resolved flags: this module has
+    no vocabulary, and keeping the decision in `mib.lexicon` means flag snapping
+    happens in exactly one place.
+    """
+    return [m.group(0) for m in _FLAG_CANDIDATE_RE.finditer(text)]
 
 
 def mine_literals(text: str) -> dict[str, list[str]]:

@@ -195,6 +195,10 @@ class PacketEvidence:
     registry_status: str | None = None
     waiver_code: str | None = None
     observed_flags: list[str] = field(default_factory=list)
+    # Flag-shaped tokens found in free OCR text rather than after an
+    # "Observed flags:" label. Kept separate because the label is what licenses
+    # aggressive truncation matching -- see Lexicon.snap_flag.
+    flag_candidates: list[str] = field(default_factory=list)
     sponsor_letter_sponsor: str | None = None
     sponsor_letter_name: str | None = None
     sponsor_letter_class: str | None = None
@@ -381,6 +385,8 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                     for name, values in ocr_module.mine_literals(text).items():
                         for value in values:
                             add(name, value)
+                    ev.flag_candidates.extend(
+                        ocr_module.mine_flag_candidates(text))
                 ev.page_types.append(SCANNED)
         finally:
             doc.close()
