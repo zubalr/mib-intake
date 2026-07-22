@@ -97,8 +97,9 @@ contaminate a 98th percentile. It now trims against the median.
 
 ## The learned adjudicator
 
-Hand-built decision paths are a 16-bucket histogram, so ~208 decidable cases were
-hedged because a bucket average sat near the boundary. A shallow
+Hand-built decision paths are a 16-bucket histogram: every packet landing on
+`risk_page_unreadable` gets the same probability vector, even where the packets
+inside differ in ways that predict the outcome. A shallow
 **histogram gradient-boosting classifier** (`max_depth=3`, 220 iterations,
 learning rate 0.06, `l2_regularization=1.0`, `min_samples_leaf=25`) over 88
 **evidence** features separates within buckets. It never sees a `case_id`,
