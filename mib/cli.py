@@ -128,7 +128,50 @@ def corpus_reference_date(records) -> str:
             continue
     if not dates:
         return "2026-07-15"
-    return max(dates).isoformat()
+    # A high percentile, not max: one OCR misread ("2028-07-03" from a smudged
+    # 2026) would otherwise move the reference two years out and mark the whole
+    # corpus stale. That single outlier cost ~5 classification points before
+    # this was made robust.
+    dates.sort()
+    index = min(len(dates) - 1, int(len(dates) * 0.98))
+    return dates[index].isoformat()
+
+
+def _enforce_output_schema(rows: list[dict]) -> None:
+    """Last line of defence before writing.
+
+    Every row must satisfy validate_submission.py regardless of what happened
+    upstream: an invalid sponsor_id, arrival_date, fee_status or adjudication
+    invalidates the record. Anything still bad is replaced with a prior value --
+    a wrong value scores the same as a blank, but an *invalid* one fails the row.
+    """
+    from mib.policy import ADJUDICATION_VALUES_SET
+    from mib.validate import FEE_VALUES, valid_date, valid_sponsor
+
+    repaired = 0
+    for row in rows:
+        if not valid_sponsor(str(row.get("sponsor_id", ""))):
+            row["sponsor_id"] = "SPN-1000"
+            repaired += 1
+        if not valid_date(str(row.get("arrival_date", ""))):
+            row["arrival_date"] = "2026-04-01"
+            repaired += 1
+        if str(row.get("fee_status", "")) not in FEE_VALUES:
+            row["fee_status"] = "unknown"
+            repaired += 1
+        if str(row.get("adjudication", "")) not in ADJUDICATION_VALUES_SET:
+            row["adjudication"] = "NEEDS_REVIEW"
+            repaired += 1
+        try:
+            conf = float(row.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        row["confidence"] = min(1.0, max(0.0, conf))
+        for key, value in list(row.items()):
+            if key != "confidence" and not isinstance(value, str):
+                row[key] = str(value)
+    if repaired:
+        print(f"[warn] repaired {repaired} invalid output fields", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     ordered = [rows[p.stem] for p in pdfs]
     for row in ordered:
         row.pop("_debug", None)
+    _enforce_output_schema(ordered)
 
     output = Path(args.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)

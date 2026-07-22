@@ -31,6 +31,7 @@ DEFAULT_CALIBRATION = Path(__file__).resolve().parent.parent / "policy" / "calib
 
 APPROVED, DENIED, NEEDS_REVIEW = "APPROVED", "DENIED", "NEEDS_REVIEW"
 OUTCOMES = (APPROVED, DENIED, NEEDS_REVIEW)
+ADJUDICATION_VALUES_SET = frozenset(OUTCOMES)
 
 # The evaluator's payoff matrix, transcribed from
 # mib-doc-challenge/scripts/evaluate.py::classification_points.

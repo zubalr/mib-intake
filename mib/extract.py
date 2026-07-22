@@ -38,7 +38,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import fitz
+
+from mib import ocr as ocr_module
 from mib.pdfio import Span, extract_spans
+from mib.validate import valid_for_field
 
 # --- Page types, in FIELD_MANUAL.md trust order ---------------------------
 ADJUDICATOR = "adjudicator_note"
@@ -48,6 +52,9 @@ SPONSOR = "sponsor_letter"
 REGISTRY = "registry_extract"
 FEE = "fee_receipt"
 UNKNOWN_PAGE = "unknown"
+# A scan of a visible page IS visible evidence -- just harder to read. It ranks
+# below the crisp text layer (OCR can misread) but far above anything hidden.
+SCANNED = "scanned_page"
 
 PAGE_TITLES = [
     ("Manual Adjudicator Note", ADJUDICATOR),
@@ -74,6 +81,7 @@ TRUST_ORDER = {
     SPONSOR: 4,
     REGISTRY: 5,
     FEE: 2,          # authoritative for fee_status only
+    SCANNED: 6,
     UNKNOWN_PAGE: 9,
 }
 
@@ -191,6 +199,7 @@ class PacketEvidence:
     sponsor_letter_name: str | None = None
     sponsor_letter_class: str | None = None
     has_text_layer: bool = True
+    ocr_pages: int = 0
 
     def values(self, field_name: str) -> list[Observation]:
         """Observations for a field, most trusted first."""
@@ -223,6 +232,7 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
         by_page.setdefault(span.page, []).append(span)
 
     visible_total = 0
+    scanned_pages: list[int] = []
 
     for page_no in sorted(by_page):
         page_spans = by_page[page_no]
@@ -283,6 +293,33 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
         if kind == SPONSOR:
             _parse_sponsor_letter(ev, visible, page_no)
 
+        # A page whose only text is the boilerplate footer is a scan. Its field
+        # content exists solely as pixels, so OCR it or lose those fields.
+        content = [s for s in visible
+                   if "Synthetic hiring" not in s.text and "/ page" not in s.text]
+        if len(content) <= 1 and ocr_module.available():
+            scanned_pages.append(page_no)
+
+    if scanned_pages:
+        doc = fitz.open(path)
+        try:
+            for page_no in scanned_pages:
+                text, _rot = ocr_module.read_page(doc[page_no])
+                if not text.strip():
+                    continue
+                ev.ocr_pages += 1
+                fields, flags, extras = ocr_module.parse_fields(text)
+                for name, value in fields.items():
+                    _record(ev, name, value, SCANNED, TRUST_ORDER[SCANNED], page_no)
+                ev.observed_flags.extend(flags)
+                if extras.get("registry_status") and ev.registry_status is None:
+                    ev.registry_status = extras["registry_status"]
+                if extras.get("waiver_code") and ev.waiver_code is None:
+                    ev.waiver_code = extras["waiver_code"]
+                ev.page_types.append(SCANNED)
+        finally:
+            doc.close()
+
     ev.has_text_layer = visible_total >= 50
 
     hidden_blob = " ".join(ev.hidden_texts).casefold()
@@ -300,6 +337,13 @@ def _record(ev: PacketEvidence, field_name: str, value: str, kind: str,
             trust: int, page: int) -> None:
     value = _clean(value)
     if not value or DAMAGE_RE.search(value) or value.upper() in DAMAGE_SENTINELS:
+        return
+    # Structural validation. OCR of a damaged scan yields values that are not
+    # merely wrong but invalid for their field ('}', '2926-05-03 ke i'), and an
+    # invalid sponsor_id or arrival_date makes the whole row fail the official
+    # validator.
+    if not valid_for_field(field_name, value):
+        ev.damaged_fields.add(field_name)
         return
     ev.observations.append(Observation(field_name, value, kind, page, trust))
 

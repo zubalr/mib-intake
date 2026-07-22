@@ -1,0 +1,162 @@
+"""OCR fallback for packet pages that carry no text layer.
+
+About 30% of scored fields live only on full-page scans (1224x1584 rasters with
+no text layer). Recovering them is the difference between ~35/50 and a
+competitive extraction score, and -- more importantly -- unread scans were the
+largest source of catastrophic false approvals, because a biometric slip we
+cannot read looks exactly like one that says "no risk flags".
+
+Three findings from prototyping on real pages drive the design:
+
+  * **Pages are rotated.** Scans appear at 90/180/270 degrees. Tesseract reads
+    almost nothing at the wrong orientation and reads cleanly at the right one,
+    so orientation must be resolved before anything else.
+  * **Contrast enhancement makes it worse.** The intuitive move -- autocontrast
+    and a contrast boost on washed-out text -- measurably *destroyed* readable
+    text: a page that OCR'd perfectly raw ("Home World: Europa Station |
+    Species Code: KAIJU_MICRO | Arrival Date: 2026-02-04") degraded to
+    "Home Word: Cwope Station". These scans are low-contrast but clean, and the
+    enhancement amplifies the scan-grid background into the glyphs. So we OCR
+    the raw grayscale and only fall back to enhancement if raw yields nothing.
+  * **200 dpi is enough**, at ~0.2 s per attempt, which keeps several rotation
+    attempts per page inside the 6 s/packet budget.
+
+Orientation is chosen by scoring each candidate on how many *known field
+labels* it produces, rather than by Tesseract's own OSD: the labels are a closed
+set we already rely on, the score is meaningful on a page with only three lines
+of text, and it costs nothing extra.
+"""
+
+from __future__ import annotations
+
+import io
+import re
+
+import fitz
+
+try:
+    import pytesseract
+    from PIL import Image, ImageEnhance, ImageOps
+    _OCR_AVAILABLE = True
+except ImportError:  # pragma: no cover - image ships with both
+    _OCR_AVAILABLE = False
+
+RENDER_DPI = 200
+TESSERACT_CONFIG = "--psm 6"
+# 0 first: unrotated pages are the common case and win on the early exit.
+ROTATIONS = (0, 90, 270, 180)
+
+# Field labels as they appear on scanned pages, used both to score orientation
+# and to parse values. Scans use inline "Label: value" rather than the text
+# layer's paired-span layout.
+OCR_LABELS = {
+    "home world": "home_world",
+    "species code": "species_code",
+    "species match": "species_code",
+    "arrival date": "arrival_date",
+    "visa class": "visa_class",
+    "sponsor id": "sponsor_id",
+    "declared purpose": "declared_purpose",
+    "applicant": "applicant_name",
+    "registry name": "applicant_name",
+    "case id": "_case_id",
+    "fee status": "fee_status",
+    "waiver code": "_waiver_code",
+    "registry status": "_registry_status",
+    "observed flags": "_observed_flags",
+    "biometric confidence": "_biometric_confidence",
+}
+
+_LINE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z ]{2,28}?)\s*[:;]\s*(.+?)\s*$")
+# Enough of a signal to stop trying further rotations.
+_GOOD_ENOUGH = 2
+
+
+def available() -> bool:
+    return _OCR_AVAILABLE
+
+
+def _score(text: str) -> int:
+    """How many known field labels this OCR attempt produced."""
+    low = text.casefold()
+    return sum(1 for label in OCR_LABELS if label in low)
+
+
+def _ocr(image: "Image.Image", rotation: int) -> str:
+    if rotation:
+        image = image.rotate(rotation, expand=True)
+    try:
+        return pytesseract.image_to_string(image, config=TESSERACT_CONFIG)
+    except Exception:  # noqa: BLE001 - a failed page must not kill the packet
+        return ""
+
+
+def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[str, int]:
+    """OCR one page, resolving orientation. Returns (text, rotation_used)."""
+    if not _OCR_AVAILABLE:
+        return "", 0
+
+    pixmap = page.get_pixmap(dpi=dpi)
+    image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("L")
+
+    best_text, best_score, best_rot = "", -1, 0
+    for rotation in ROTATIONS:
+        text = _ocr(image, rotation)
+        score = _score(text)
+        if score > best_score:
+            best_text, best_score, best_rot = text, score, rotation
+        if score >= _GOOD_ENOUGH:
+            break
+
+    # Only now, having failed on the raw image, is enhancement worth trying --
+    # it helps genuinely faint scans but harms merely low-contrast ones.
+    if best_score <= 0:
+        enhanced = ImageEnhance.Contrast(
+            ImageOps.autocontrast(image, cutoff=1)).enhance(2.0)
+        for rotation in ROTATIONS:
+            text = _ocr(enhanced, rotation)
+            score = _score(text)
+            if score > best_score:
+                best_text, best_score, best_rot = text, score, rotation
+            if score >= _GOOD_ENOUGH:
+                break
+
+    return best_text, best_rot
+
+
+def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
+    """Parse OCR text into (fields, observed_flags, extras).
+
+    `extras` carries non-scored signals the policy layer wants (registry status,
+    waiver code). Values are returned raw; snapping onto the closed vocabulary
+    is the caller's job, so OCR noise is corrected in exactly one place.
+    """
+    fields: dict[str, str] = {}
+    flags: list[str] = []
+    extras: dict[str, str] = {}
+
+    for line in text.splitlines():
+        match = _LINE_RE.match(line)
+        if not match:
+            continue
+        label = " ".join(match.group(1).split()).casefold()
+        value = match.group(2).strip().strip("|").strip()
+        target = OCR_LABELS.get(label)
+        if not target or not value:
+            continue
+
+        if target == "_observed_flags":
+            for part in re.split(r"[,;|]", value):
+                part = part.strip()
+                if part and part.lower() != "none":
+                    flags.append(part)
+        elif target == "_registry_status":
+            extras["registry_status"] = value
+        elif target == "_waiver_code":
+            extras["waiver_code"] = value
+        elif target.startswith("_"):
+            continue
+        elif target not in fields:
+            fields[target] = value
+
+    return fields, flags, extras
