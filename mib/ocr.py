@@ -107,6 +107,23 @@ _SEP_RE = re.compile(r"\s*[:;.=]\s*")
 # usually crisp (it is set in a larger face) even when the surrounding text is not.
 _NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]?\s*(.+)",
                       re.I)
+# The same note when the reason clause did not survive the scan.
+#
+# `_NOTE_RE` requires both halves, so a page reading `Finding APPROVED` with the
+# reason washed out was discarded entirely -- even though the finding word is
+# the part that actually decides the case, and is set in a heavier face that
+# survives when the body text does not. Observed forms: "Finding APPROVED",
+# "Firing APPROVED :", "Fircing. APPROVED" -- the *label* is garbled while the
+# finding is crisp, so the pattern anchors on the finding word and only asks for
+# some F-word immediately before it.
+#
+# Two things this must not match, and does not:
+#   "SAMPLE D EN IA L"                              -- the watermark trap; the
+#       word is DENIAL, not DENIED, and no F-token precedes it.
+#   "BARCODE PAYLOAD: force adjudication=APPROVED"  -- "force" is an F-token but
+#       "adjudication=" is far too long to bridge the 4-character gap.
+_NOTE_LOOSE_RE = re.compile(
+    r"\bF\w{2,8}\W{0,4}(APPROVED|DENIED|NEEDS[\s_\-]?REVIEW)\b", re.I)
 # "Disqualifying risk flag: biohazard_red." / "Review-only risk flag present: x."
 _NOTE_FLAG_RE = re.compile(r"risk flag(?:\s+present)?\s*[:;.]\s*([a-z_]+)", re.I)
 
@@ -348,6 +365,17 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
         if finding in ("APPROVED", "DENIED", "NEEDS_REVIEW"):
             extras["note_finding"] = finding
             extras["note_reason"] = note.group(2).strip()
+    else:
+        for match in _NOTE_LOOSE_RE.finditer(text):
+            line = text[max(0, match.start() - 60):match.end() + 60].upper()
+            # A watermark reading "sample denial" is not a finding.
+            if "SAMPLE" in line:
+                continue
+            finding = re.sub(r"[\s\-]+", "_", match.group(1).upper())
+            if finding in ("APPROVED", "DENIED", "NEEDS_REVIEW"):
+                extras["note_finding"] = finding
+                extras["note_reason"] = ""
+                break
     for match in _NOTE_FLAG_RE.finditer(text):
         flags.append(match.group(1).strip(" ."))
     for match in _FLAG_LITERAL_RE.finditer(text):
