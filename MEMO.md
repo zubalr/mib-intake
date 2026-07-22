@@ -152,7 +152,8 @@ The ceiling is not 150. Some packets contradict their own labels (document says
 `unpaid`, truth `paid`) and some fields exist nowhere in the PDF. `risk_flags` is
 the worst field at 0.785, and it is also the most expensive — weight 8, 1.91
 points. 176 of its 215 misses are packets where we report no flags and the truth
-has some; 137 of those hold a scanned page the OCR ladder returns nothing from.
+has some, and 120 of those hold a scanned page whose risk panel the OCR ladder
+never reads.
 The largest confusion cell — 73 approvable cases hedged to NEEDS_REVIEW — is by
 contrast *already correct*. On the `risk_page_unreadable` path the fitted
 distribution is 0.371 / 0.290 / 0.338, so hedging returns 4.03 in expected raw
