@@ -133,6 +133,82 @@ _FURNITURE_RE = re.compile(
     r"|Synthetic hiring.*|Packet MIB-\d+.*)\b", re.I)
 
 
+# --- Literal mining -------------------------------------------------------
+#
+# Two fields have a rigid shape that no vocabulary can express but a regex can:
+# `sponsor_id` is always ``SPN-\d{4}`` and `arrival_date` is always an ISO date.
+# That rigidity is worth exploiting, because it is exactly where OCR fails in a
+# *repairable* way. Sampling twelve packets that lost their sponsor showed:
+#
+#     want SPN-7185   OCR read "Sponsor ID: SPN-T185"
+#     want SPN-8734   OCR read "Sponsor 1D: SPN8T34" / "SPN.S734"
+#     want SPN-8509   OCR read "Sponsor ID: [SPONSOR ID BLANK]"   <- truly gone
+#
+# The first two are one letter/digit confusion away from correct and were being
+# thrown away wholesale, because `SPN-T185` fails the `^SPN-\d{4}$` structural
+# check that (rightly) protects the official validator. Repairing the confusion
+# *inside* the token, then validating, recovers them without weakening the
+# check: nothing reaches the record unless it is a well-formed sponsor id.
+#
+# Only substitutions where the glyphs genuinely collide are listed. `E->5` was
+# observed once and deliberately left out -- a single sample is not evidence,
+# and a wrong-but-valid sponsor id is worse than none, because sponsor identity
+# feeds the revoked-sponsor policy path.
+_DIGIT_REPAIR = str.maketrans({
+    "O": "0", "o": "0", "Q": "0", "D": "0",
+    "I": "1", "l": "1", "i": "1", "|": "1",
+    "Z": "2", "z": "2",
+    "A": "4",
+    "S": "5", "s": "5",
+    "G": "6",
+    "T": "7", "t": "7",
+    "B": "8",
+    "g": "9", "q": "9",
+})
+
+# "SPN" itself is misread too ("SPN"/"SRN"/"5PN"), and the hyphen is routinely
+# dropped or turned into '.', so the separator is optional.
+_SPONSOR_MINE_RE = re.compile(r"[S5][PR]N[\s.:;,\-_]{0,3}([0-9A-Za-z|]{4})(?![0-9])")
+# Date separators survive worse than the digits do.
+_DATE_MINE_RE = re.compile(
+    r"(?<![0-9])([0-9A-Za-z|]{4})[\s.\-–—/]([0-9A-Za-z|]{2})[\s.\-–—/]([0-9A-Za-z|]{2})(?![0-9])")
+
+
+def _to_digits(token: str) -> str | None:
+    """Repair a token that should be all digits, or None if it cannot be."""
+    fixed = token.translate(_DIGIT_REPAIR)
+    return fixed if fixed.isdigit() else None
+
+
+def mine_literals(text: str) -> dict[str, list[str]]:
+    """Structurally-valid sponsor ids and ISO dates found anywhere in `text`.
+
+    Returned as *candidates*, not answers -- the caller records them alongside
+    the label-parsed values and resolution picks between them. Mining is a
+    fallback for when the label line itself did not survive, so it must never
+    outrank a cleanly-parsed value.
+    """
+    out: dict[str, list[str]] = {}
+
+    for match in _SPONSOR_MINE_RE.finditer(text):
+        digits = _to_digits(match.group(1))
+        if digits:
+            out.setdefault("sponsor_id", []).append(f"SPN-{digits}")
+
+    for match in _DATE_MINE_RE.finditer(text):
+        year, month, day = (_to_digits(g) for g in match.groups())
+        if not (year and month and day):
+            continue
+        # Range-check before emitting: OCR debris regularly produces
+        # syntactically date-shaped nonsense like "2926-05-03".
+        if not (2000 <= int(year) <= 2099 and 1 <= int(month) <= 12
+                and 1 <= int(day) <= 31):
+            continue
+        out.setdefault("arrival_date", []).append(f"{year}-{month}-{day}")
+
+    return out
+
+
 def _strip_furniture(value: str) -> str:
     value = _FURNITURE_RE.sub(" ", value)
     # Trailing single-character debris ("Tekdane Tekmora i").

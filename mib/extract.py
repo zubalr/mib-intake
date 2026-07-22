@@ -333,15 +333,18 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                 # snaps onto the closed vocabulary, which is a far better
                 # arbiter than whichever variant happened to run first.
                 seen: set[tuple[str, str]] = set()
+
+                def add(name: str, value: str) -> None:
+                    key = (name, _clean(value).casefold())
+                    if key in seen:
+                        return
+                    seen.add(key)
+                    _record(ev, name, value, SCANNED, TRUST_ORDER[SCANNED], page_no)
+
                 for text in texts:
                     fields, flags, extras = ocr_module.parse_fields(text)
                     for name, value in fields.items():
-                        key = (name, _clean(value).casefold())
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        _record(ev, name, value, SCANNED, TRUST_ORDER[SCANNED],
-                                page_no)
+                        add(name, value)
                     ev.observed_flags.extend(flags)
                     if extras.get("registry_status") and ev.registry_status is None:
                         ev.registry_status = extras["registry_status"]
@@ -364,6 +367,14 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                     # "no flags" -- the distinction that governs false approvals.
                     if "RISK PANEL MISSING" in text.upper():
                         ev.risk_panel_missing = True
+
+                # Mined literals go in last, so a value parsed from its own
+                # label always wins the page-order tiebreak against one merely
+                # found floating in the text.
+                for text in texts:
+                    for name, values in ocr_module.mine_literals(text).items():
+                        for value in values:
+                            add(name, value)
                 ev.page_types.append(SCANNED)
         finally:
             doc.close()

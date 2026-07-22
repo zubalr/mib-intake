@@ -134,13 +134,30 @@ def corpus_reference_date(records) -> str:
             continue
     if not dates:
         return "2026-07-15"
-    # A high percentile, not max: one OCR misread ("2028-07-03" from a smudged
-    # 2026) would otherwise move the reference two years out and mark the whole
-    # corpus stale. That single outlier cost ~5 classification points before
-    # this was made robust.
     dates.sort()
-    index = min(len(dates) - 1, int(len(dates) * 0.98))
-    return dates[index].isoformat()
+
+    # Trim outliers *before* taking the percentile.
+    #
+    # A high percentile alone is not enough. It survives a single misread, but
+    # `6` and `8` collide often enough that a whole *cluster* of packets reads
+    # "2028" where the truth is "2026" -- 33 of 1,000 once literal mining began
+    # recovering dates the label parser had been dropping. At 3.3% contamination
+    # the 98th percentile lands inside the bad cluster, which pushed the
+    # reference two years out, marked 372 packets stale, and cost 3.3
+    # classification points.
+    #
+    # The median cannot be moved by 3% contamination, so measure distance from
+    # it. The window floor is deliberately generous -- it must not trim a corpus
+    # that genuinely spans a wide range. The goal is only to drop dates that sit
+    # implausibly far from every other date in the same corpus.
+    median = dates[len(dates) // 2]
+    deviations = sorted(abs((d - median).days) for d in dates)
+    mad = deviations[len(deviations) // 2]
+    window = max(730, 6 * mad)
+    kept = [d for d in dates if abs((d - median).days) <= window] or dates
+
+    index = min(len(kept) - 1, int(len(kept) * 0.98))
+    return kept[index].isoformat()
 
 
 def available_cpus() -> int:

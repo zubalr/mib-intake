@@ -48,6 +48,13 @@ def looks_damaged(value: str) -> bool:
     low = value.casefold()
     if any(word in low for word in DAMAGE_WORDS):
         return True
+    # An opening bracket with no closing one is a damage marker the scan cut
+    # off mid-word: `[SPECIES WHITEOUT]` came back as `[SPE`, which carries no
+    # damage word and enough letters to pass every other check, so it was being
+    # recorded as if it were a species code. No real field value starts with a
+    # bracket, so this is safe to reject outright.
+    if value[:1] in "[{(" and not any(c in value for c in "]})"):
+        return True
     # A value that is mostly punctuation is OCR debris, not content.
     stripped = re.sub(r"[^A-Za-z0-9]", "", value)
     return len(stripped) < max(1, len(value) // 3)

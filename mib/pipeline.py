@@ -186,10 +186,20 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
                 snapped, conf = lexicon.snap(field, value)
                 if conf > 0.0:
                     value = snapped
+                else:
+                    # Nothing in the closed set is close, so what we read is
+                    # OCR debris rather than a value. Printing it is a certain
+                    # miss where the prior mode has the base rate, and -- more
+                    # importantly -- feeding it to the policy engine as though
+                    # it were a known visa class silently corrupts the decision
+                    # path. Treat it as unread.
+                    value = None
             elif field == "applicant_name":
                 snapped, conf = lexicon.snap_name(value)
                 if conf > 0.0:
                     value = snapped
+
+        if value is not None:
             resolved[field] = value
             printed[field] = value
             continue
