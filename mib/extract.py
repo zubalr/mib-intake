@@ -323,34 +323,47 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
         doc = fitz.open(path)
         try:
             for page_no in scanned_pages:
-                text, _rot = ocr_module.read_page(doc[page_no])
-                if not text.strip():
+                texts, _rot = ocr_module.read_page(doc[page_no])
+                if not texts:
                     continue
                 ev.ocr_pages += 1
-                fields, flags, extras = ocr_module.parse_fields(text)
-                for name, value in fields.items():
-                    _record(ev, name, value, SCANNED, TRUST_ORDER[SCANNED], page_no)
-                ev.observed_flags.extend(flags)
-                if extras.get("registry_status") and ev.registry_status is None:
-                    ev.registry_status = extras["registry_status"]
-                if extras.get("waiver_code") and ev.waiver_code is None:
-                    ev.waiver_code = extras["waiver_code"]
-                if extras.get("biometric_confidence") and ev.biometric_confidence is None:
-                    try:
-                        ev.biometric_confidence = min(
-                            100, int(extras["biometric_confidence"])) / 100.0
-                    except ValueError:
-                        pass
-                # A scanned adjudicator note is still the top evidence tier.
-                # Text-layer notes win if both exist.
-                if extras.get("note_finding") and ev.note_finding is None:
-                    ev.note_finding = extras["note_finding"]
-                    ev.note_reason = extras.get("note_reason", "")
-                    ev.note_from_ocr = True
-                # An explicitly missing risk panel is unread evidence, not
-                # "no flags" -- the distinction that governs false approvals.
-                if "RISK PANEL MISSING" in text.upper():
-                    ev.risk_panel_missing = True
+                # Every reading of the page contributes candidates. Two
+                # configurations that disagree on `home_world` both get
+                # recorded; `mib.pipeline` picks between them by how well each
+                # snaps onto the closed vocabulary, which is a far better
+                # arbiter than whichever variant happened to run first.
+                seen: set[tuple[str, str]] = set()
+                for text in texts:
+                    fields, flags, extras = ocr_module.parse_fields(text)
+                    for name, value in fields.items():
+                        key = (name, _clean(value).casefold())
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        _record(ev, name, value, SCANNED, TRUST_ORDER[SCANNED],
+                                page_no)
+                    ev.observed_flags.extend(flags)
+                    if extras.get("registry_status") and ev.registry_status is None:
+                        ev.registry_status = extras["registry_status"]
+                    if extras.get("waiver_code") and ev.waiver_code is None:
+                        ev.waiver_code = extras["waiver_code"]
+                    if extras.get("biometric_confidence") \
+                            and ev.biometric_confidence is None:
+                        try:
+                            ev.biometric_confidence = min(
+                                100, int(extras["biometric_confidence"])) / 100.0
+                        except ValueError:
+                            pass
+                    # A scanned adjudicator note is still the top evidence tier.
+                    # Text-layer notes win if both exist.
+                    if extras.get("note_finding") and ev.note_finding is None:
+                        ev.note_finding = extras["note_finding"]
+                        ev.note_reason = extras.get("note_reason", "")
+                        ev.note_from_ocr = True
+                    # An explicitly missing risk panel is unread evidence, not
+                    # "no flags" -- the distinction that governs false approvals.
+                    if "RISK PANEL MISSING" in text.upper():
+                        ev.risk_panel_missing = True
                 ev.page_types.append(SCANNED)
         finally:
             doc.close()

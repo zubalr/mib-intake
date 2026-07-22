@@ -6,7 +6,7 @@ competitive extraction score, and -- more importantly -- unread scans were the
 largest source of catastrophic false approvals, because a biometric slip we
 cannot read looks exactly like one that says "no risk flags".
 
-Three findings from prototyping on real pages drive the design:
+Four findings from prototyping on real pages drive the design:
 
   * **Pages are rotated.** Scans appear at 90/180/270 degrees. Tesseract reads
     almost nothing at the wrong orientation and reads cleanly at the right one,
@@ -18,13 +18,31 @@ Three findings from prototyping on real pages drive the design:
     "Home Word: Cwope Station". These scans are low-contrast but clean, and the
     enhancement amplifies the scan-grid background into the glyphs. So we OCR
     the raw grayscale and only fall back to enhancement if raw yields nothing.
-  * **200 dpi is enough**, at ~0.2 s per attempt, which keeps several rotation
-    attempts per page inside the 6 s/packet budget.
+  * **Segmentation mode dominates everything else.** `--psm 6` ("one uniform
+    block of text") was the original choice and is simply wrong for these pages:
+    they are sparse labelled fields scattered across a form with table rules, so
+    Tesseract tries to read the rules as text and returns pipe soup. On a
+    representative intake scan, psm 6 recovered a single garbled value
+    (``Declored Purpose: verctotary I``) while `--psm 11` ("sparse text") read
+    the same page nearly whole -- species code, visa class, home world, purpose,
+    applicant and arrival date. That one flag was worth more than every other
+    OCR change combined.
+  * **No single configuration wins on every page**, which is why this module
+    returns *several* readings rather than one. Measured on four packets: one
+    page was read best by 200 dpi/psm 11, another only by 300 dpi/psm 12, a
+    third equally well by all of them. The variants disagree in a useful way --
+    each recovers fields the others drop -- so every variant's values are
+    recorded as candidates and the caller picks per field by lexicon-snap
+    confidence. Merging beats choosing.
 
 Orientation is chosen by scoring each candidate on how many *known field
 labels* it produces, rather than by Tesseract's own OSD: the labels are a closed
 set we already rely on, the score is meaningful on a page with only three lines
 of text, and it costs nothing extra.
+
+Budget: ~0.2-0.3 s per attempt, ~4 attempts per scanned page, ~3 scanned pages
+per packet. That is well inside the 6 s/packet scoring budget, of which the
+single-variant pipeline was using only 1.21 s.
 """
 
 from __future__ import annotations
@@ -42,7 +60,18 @@ except ImportError:  # pragma: no cover - image ships with both
     _OCR_AVAILABLE = False
 
 RENDER_DPI = 200
-TESSERACT_CONFIG = "--psm 6"
+# Segmentation mode used to resolve orientation. psm 11 is both the best reader
+# of these pages and therefore the best orientation discriminator -- it finds
+# the most labels, which is exactly what the orientation score counts.
+PROBE_PSM = 11
+# Additional readings taken at the resolved orientation. Deliberately small and
+# diverse rather than an exhaustive sweep: each entry earned its place by being
+# the *only* configuration that read some page in the sample.
+#   200/11 -- the probe pass, reused for free
+#   200/6  -- the original mode; still wins on dense receipt pages
+#   300/12 -- sparse text with OSD; recovered pages all others returned empty
+#   300/11 -- higher resolution helps small type on the biometric slip
+VARIANTS = ((200, 11), (200, 6), (300, 12), (300, 11))
 # 0 first: unrotated pages are the common case and win on the early exit.
 ROTATIONS = (0, 90, 270, 180)
 
@@ -124,46 +153,65 @@ def _score(text: str) -> int:
     return sum(1 for label in OCR_LABELS if label in low)
 
 
-def _ocr(image: "Image.Image", rotation: int) -> str:
+def _render(page: "fitz.Page", dpi: int) -> "Image.Image":
+    pixmap = page.get_pixmap(dpi=dpi)
+    return Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("L")
+
+
+def _ocr(image: "Image.Image", psm: int, rotation: int = 0) -> str:
     if rotation:
         image = image.rotate(rotation, expand=True)
     try:
-        return pytesseract.image_to_string(image, config=TESSERACT_CONFIG)
+        return pytesseract.image_to_string(image, config=f"--psm {psm}")
     except Exception:  # noqa: BLE001 - a failed page must not kill the packet
         return ""
 
 
-def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[str, int]:
-    """OCR one page, resolving orientation. Returns (text, rotation_used)."""
-    if not _OCR_AVAILABLE:
-        return "", 0
+def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]:
+    """OCR one page several ways. Returns (texts, rotation_used).
 
-    pixmap = page.get_pixmap(dpi=dpi)
-    image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("L")
+    Orientation is resolved once with the cheap probe pass -- it is a property
+    of the page, not of the configuration -- and every remaining variant is then
+    read at that orientation. Returning the full list rather than a single
+    "best" text is the point: the variants recover overlapping but different
+    field sets, and the caller merges them per field.
+    """
+    if not _OCR_AVAILABLE:
+        return [], 0
+
+    renders: dict[int, "Image.Image"] = {dpi: _render(page, dpi)}
 
     best_text, best_score, best_rot = "", -1, 0
     for rotation in ROTATIONS:
-        text = _ocr(image, rotation)
+        text = _ocr(renders[dpi], PROBE_PSM, rotation)
         score = _score(text)
         if score > best_score:
             best_text, best_score, best_rot = text, score, rotation
         if score >= _GOOD_ENOUGH:
             break
 
-    # Only now, having failed on the raw image, is enhancement worth trying --
-    # it helps genuinely faint scans but harms merely low-contrast ones.
-    if best_score <= 0:
+    texts = [best_text]
+    for vdpi, psm in VARIANTS:
+        if (vdpi, psm) == (dpi, PROBE_PSM):
+            continue  # already have it, as the probe
+        if vdpi not in renders:
+            renders[vdpi] = _render(page, vdpi)
+        texts.append(_ocr(renders[vdpi], psm, best_rot))
+
+    # Only now, having failed on the raw image under every configuration, is
+    # enhancement worth trying -- it helps genuinely faint scans but harms
+    # merely low-contrast ones.
+    if max((_score(t) for t in texts), default=0) <= 0:
         enhanced = ImageEnhance.Contrast(
-            ImageOps.autocontrast(image, cutoff=1)).enhance(2.0)
+            ImageOps.autocontrast(renders[dpi], cutoff=1)).enhance(2.0)
         for rotation in ROTATIONS:
-            text = _ocr(enhanced, rotation)
-            score = _score(text)
-            if score > best_score:
-                best_text, best_score, best_rot = text, score, rotation
-            if score >= _GOOD_ENOUGH:
+            text = _ocr(enhanced, PROBE_PSM, rotation)
+            texts.append(text)
+            if _score(text) >= _GOOD_ENOUGH:
+                best_rot = rotation
                 break
 
-    return best_text, best_rot
+    return [t for t in texts if t.strip()], best_rot
 
 
 def _match_label(raw: str) -> str | None:

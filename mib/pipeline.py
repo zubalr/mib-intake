@@ -21,6 +21,7 @@ itself into approving a packet it could not read.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,12 +57,57 @@ ADJUDICATOR_NOTE_PATH = "adjudicator_note_finding"
 FEE_VALUES = {"paid", "waived", "unpaid", "unknown"}
 
 
-def _resolve(ev: PacketEvidence, field: str) -> str | None:
-    """Most-trusted visible value for a field, or None if no trusted evidence."""
-    best = ev.best(field)
-    if best is None or not best.trusted:
+# Fields whose shape is checkable without a vocabulary, used to score OCR
+# candidates that no closed set can arbitrate.
+_SPONSOR_RE = re.compile(r"^SPN-\d{4}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _candidate_score(field: str, value: str, lexicon: Lexicon) -> float:
+    """How much a candidate value looks like a real value for its field.
+
+    Only used to break ties *within* one trust tier. Multi-variant OCR now
+    yields several readings of the same scan -- ``Woll-108 fc`` and
+    ``Wolf-1061c`` for the same line -- and taking whichever ran first is
+    arbitrary. Snap confidence is the honest arbiter: it is the same measure the
+    printer already trusts to correct OCR noise, so a candidate that snaps
+    cleanly is, by construction, the one we would have printed anyway.
+    """
+    value = value.strip()
+    if not value:
+        return 0.0
+    if field in SNAP_FIELDS:
+        return lexicon.snap(field, value)[1]
+    if field == "applicant_name":
+        return lexicon.snap_name(value)[1]
+    if field == "sponsor_id":
+        return 1.0 if _SPONSOR_RE.match(value) else 0.0
+    if field == "arrival_date":
+        return 1.0 if _DATE_RE.match(value) else 0.0
+    if field == "fee_status":
+        return 1.0 if value.casefold() in FEE_VALUES else lexicon.snap(
+            "fee_status", value)[1] * 0.9
+    return 0.0
+
+
+def _resolve(ev: PacketEvidence, field: str, lexicon: Lexicon | None = None
+             ) -> str | None:
+    """Most-trusted visible value for a field, or None if no trusted evidence.
+
+    Where several equally-trusted observations exist -- several OCR variants of
+    the same scan, or the same field printed on two pages of the same rank --
+    the one that scores best as a *plausible value* wins, with page order as the
+    final tiebreak so resolution stays deterministic.
+    """
+    values = [o for o in ev.values(field) if o.trusted]
+    if not values:
         return None
-    return best.value
+    top = values[0].trust
+    tier = [o for o in values if o.trust == top]
+    if len(tier) == 1 or lexicon is None:
+        return tier[0].value
+    return max(tier, key=lambda o: (_candidate_score(field, o.value, lexicon),
+                                    -o.page)).value
 
 
 def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
@@ -133,7 +179,7 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
     printed: dict[str, str] = {}
 
     for field in ("applicant_name", *SNAP_FIELDS, "sponsor_id", "arrival_date"):
-        value = _resolve(ev, field)
+        value = _resolve(ev, field, lexicon)
 
         if value is not None:
             if field in SNAP_FIELDS:
@@ -158,7 +204,7 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
         else:
             printed[field] = lexicon.prior_mode(field)
 
-    fee_raw = _resolve(ev, "fee_status")
+    fee_raw = _resolve(ev, "fee_status", lexicon)
     fee = UNKNOWN
     if fee_raw:
         candidate = fee_raw.strip().lower()
