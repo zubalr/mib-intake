@@ -137,6 +137,35 @@ def corpus_reference_date(records) -> str:
     return dates[index].isoformat()
 
 
+def available_cpus() -> int:
+    """CPU count the container is actually allowed to use.
+
+    `os.cpu_count()` reports the *host's* CPUs, which inside the scoring
+    container is 14 while `--cpus 4` is enforced by the cgroup. Spawning 8 OCR
+    workers onto a 4-CPU quota just adds contention and context switching. Read
+    the cgroup quota and fall back to the host count only when there is none.
+    """
+    for quota_path, period_path in (
+        ("/sys/fs/cgroup/cpu.max", None),                        # cgroup v2
+        ("/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+         "/sys/fs/cgroup/cpu/cpu.cfs_period_us"),                # cgroup v1
+    ):
+        try:
+            raw = Path(quota_path).read_text().strip()
+            if period_path is None:
+                quota_s, period_s = raw.split()
+            else:
+                quota_s, period_s = raw, Path(period_path).read_text().strip()
+            if quota_s in ("max", "-1"):
+                continue
+            quota, period = int(quota_s), int(period_s)
+            if quota > 0 and period > 0:
+                return max(1, quota // period)
+        except (OSError, ValueError):
+            continue
+    return os.cpu_count() or 4
+
+
 def _enforce_output_schema(rows: list[dict]) -> None:
     """Last line of defence before writing.
 
@@ -191,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         write_jsonl(args.output_path, [])
         return 1
 
-    workers = args.workers or min(os.cpu_count() or 4, 8)
+    workers = args.workers or max(1, min(available_cpus(), 8))
     print(f"[info] {len(pdfs)} packets, {workers} workers", file=sys.stderr)
 
     rows: dict[str, dict] = {}
