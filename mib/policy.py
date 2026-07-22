@@ -118,6 +118,94 @@ def corpus_revoked_sponsors(records) -> frozenset[str]:
     return frozenset(s for s, n in counts.items() if n > threshold)
 
 
+# A repaired year must beat the runner-up by this factor before it is adopted.
+# Same multiple as `REVOKED_FREQUENCY_MULTIPLE`, and for the same reason: the
+# observed margin is enormous (826 against 48), so the exact value is not load
+# bearing.
+YEAR_DOMINANCE = 4
+# Below this many dated packets the year histogram is not worth trusting, so the
+# repair turns itself off rather than degrading to noise.
+MIN_DATED_FOR_YEAR_REPAIR = 50
+
+
+def corpus_years(records) -> dict[str, int]:
+    """Year histogram of the corpus, restricted to the run containing the mode.
+
+    This exists to repair a misread year, so it must first decide which years are
+    real. A frequency threshold cannot do that, and the reason is worth stating:
+    30 of 1,000 training packets misread 2026 as 2028, so the *wrong* year holds
+    3.3% of the corpus against a genuine 2025 at 5.3%. Any cutoff separating
+    those two is a constant fitted to this corpus -- the same correlated-OCR-error
+    trap that broke the staleness reference twice (see 4.18).
+
+    What does separate them is that arrival dates are **continuous in time**. The
+    real years form an unbroken run; the spurious 2028 sits beyond an empty 2027.
+    So take the maximal contiguous run of observed years containing the modal
+    year and treat anything past the gap as a misread. A corpus genuinely
+    spanning 2025-2030 keeps all six.
+    """
+    counts: dict[int, int] = {}
+    for record in records:
+        value = getattr(record, "arrival_date", None)
+        if value and value != UNKNOWN:
+            try:
+                year = _dt.date.fromisoformat(value).year
+            except (ValueError, TypeError):
+                continue
+            counts[year] = counts.get(year, 0) + 1
+    if sum(counts.values()) < MIN_DATED_FOR_YEAR_REPAIR:
+        return {}
+
+    mode = max(counts, key=lambda y: counts[y])
+    run = {mode: counts[mode]}
+    for step in (-1, 1):
+        year = mode + step
+        while year in counts:
+            run[year] = counts[year]
+            year += step
+    return {f"{y:04d}": n for y, n in run.items()}
+
+
+def repair_year(value: str, years: dict[str, int]) -> str | None:
+    """Adopt a corpus year one substitution from this date's, if it is decisive.
+
+    Returns the repaired ISO date, or None to leave the value alone.
+
+    Uniqueness alone is not usable here: 2028 is one substitution from both 2026
+    and 2025, so requiring a single candidate rejects every repair. The tie
+    breaks on the corpus histogram instead, requiring the winner to dominate.
+
+    **The result is a better guess, not new evidence.** Callers print it and must
+    not promote it onto the `Record`. Measured both ways: printing it is worth
+    +0.09 extraction, while also feeding it to the policy engine gives that back
+    and more -- 11 of the 32 repairs fix the year and still have the wrong month
+    or day, and a plausible-but-wrong date can make a stale packet look fresh.
+    `MEMO.md` states the rule this is an instance of: a guess fills the output,
+    never the decision.
+    """
+    if not years:
+        return None
+    try:
+        parsed = _dt.date.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    observed = f"{parsed.year:04d}"
+    if observed in years:
+        return None
+
+    hits = sorted((n, y) for y, n in years.items()
+                  if len(y) == len(observed)
+                  and sum(a != b for a, b in zip(y, observed)) == 1)
+    if not hits:
+        return None
+    if len(hits) > 1 and hits[-1][0] < YEAR_DOMINANCE * hits[-2][0]:
+        return None
+    try:
+        return parsed.replace(year=int(hits[-1][1])).isoformat()
+    except ValueError:  # 29 February landing in a non-leap year
+        return None
+
+
 def apply_reference_date(record: "Record", reference: str,
                          revoked: frozenset[str] = frozenset()) -> "Record":
     """Attach corpus-level context to a record: staleness reference, the

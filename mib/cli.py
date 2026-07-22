@@ -307,7 +307,9 @@ def main(argv: list[str] | None = None) -> int:
     reference = corpus_reference_date([r["record"] for r in good])
     revoked = corpus_revoked_sponsors([r["record"] for r in good])
     median_date = corpus_median_date([r["record"] for r in good])
+    years = corpus_years([r["record"] for r in good])
     print(f"[info] staleness reference date: {reference}", file=sys.stderr)
+    print(f"[info] corpus arrival years: {years}", file=sys.stderr)
     print(f"[info] corpus-derived revoked sponsors: {sorted(revoked)}", file=sys.stderr)
     print(f"[info] adjudicator: "
           f"{'model ' + str(_ADJUDICATOR.metadata.get('kind')) if _ADJUDICATOR else 'hand-built paths'}",
@@ -320,8 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                 case_id, _LEXICON, _CALIBRATION, row.get("reason", "?")).to_row()
             continue
         record = apply_reference_date(row["record"], reference, revoked)
-        if record.arrival_date == "unknown" and median_date:
-            row["printed"]["arrival_date"] = median_date
+        resolve_printed_date(row["printed"], record, median_date, years)
         final[case_id] = finalize(
             row["printed"], record, row["note"], _CALIBRATION,
             adjudicator=_ADJUDICATOR, features=row.get("features")).to_row()

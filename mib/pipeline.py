@@ -44,6 +44,7 @@ from mib.policy import (
     UNKNOWN,
     Calibration,
     Record,
+    repair_year,
 )
 from mib.schema import FALLBACK_ARRIVAL_DATE, FALLBACK_SPONSOR_ID, Prediction
 
@@ -330,6 +331,36 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
     printed["_damaged"] = ",".join(sorted(ev.damaged_fields))
     feats = packet_features(ev, record)
     return Extraction(printed=printed, record=record, note=note, features=feats)
+
+
+def resolve_printed_date(printed: dict[str, str], record: Record,
+                         median_date: str | None,
+                         years: dict[str, int] | None = None) -> None:
+    """Settle the *printed* arrival date using corpus-level context.
+
+    Two corrections, both of which improve the emitted value without touching the
+    `Record` the policy engine reads:
+
+      * no date was recovered at all -> print the corpus median, since a blank
+        and a wrong value score the same and the median has the base rate;
+      * a date was recovered but its year is a misread -> print the repaired
+        year (`repair_year`).
+
+    Neither is promoted to evidence. That separation is the whole point and it is
+    measured: promoting the repair costs more classification than the repair wins
+    in extraction.
+
+    Phase 2 lives in three places -- the CLI, the cached scorer and the trainer's
+    out-of-fold writer -- and they must agree exactly or calibration is fitted
+    against a system that does not ship. Hence one function.
+    """
+    if record.arrival_date == UNKNOWN:
+        if median_date:
+            printed["arrival_date"] = median_date
+        return
+    mended = repair_year(record.arrival_date, years or {})
+    if mended:
+        printed["arrival_date"] = mended
 
 
 def finalize(printed: dict[str, str], record: Record, note: str | None,

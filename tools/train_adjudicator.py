@@ -331,9 +331,11 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
     saw the packet, so `scripts/evaluate.py` reports something believable.
     """
     import json
-    from mib.cli import _enforce_output_schema, corpus_reference_date, fallback_prediction
+    from mib.cli import (_enforce_output_schema, corpus_median_date,
+                         corpus_reference_date, fallback_prediction)
     from mib.lexicon import Lexicon
-    from mib.pipeline import finalize
+    from mib.pipeline import finalize, resolve_printed_date
+    from mib.policy import corpus_years
 
     oof = cross_val_predict(CANDIDATES[best_name](), X, y, cv=cv,
                             method="predict_proba", n_jobs=1)
@@ -351,6 +353,12 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
     lexicon = Lexicon()
     good = [r for r in rows if not r["failed"]]
     reference = corpus_reference_date([r["record"] for r in good])
+    # The CLI settles the printed date against corpus-level context; the
+    # out-of-fold writer must do the same or it scores a system that does not
+    # ship. It was previously omitted here -- worth only ~0.02 points, but the
+    # divergence is the shape of failure this project keeps paying for.
+    median_date = corpus_median_date([r["record"] for r in good])
+    years = corpus_years([r["record"] for r in good])
 
     out = []
     for row in cache["rows"]:
@@ -360,6 +368,7 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
             continue
         record = apply_reference_date(row["record"], reference,
                                       corpus_revoked_sponsors([r["record"] for r in rows]))
+        resolve_printed_date(row["printed"], record, median_date, years)
         probs = by_case.get(row["case_id"])
         if probs is None:
             # Note-settled: decided by rule, no model involved.

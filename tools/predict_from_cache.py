@@ -24,8 +24,9 @@ from pathlib import Path
 from mib.cli import (_enforce_output_schema, corpus_median_date,
                      corpus_reference_date, fallback_prediction)
 from mib.lexicon import Lexicon
-from mib.policy import Calibration, apply_reference_date, corpus_revoked_sponsors
-from mib.pipeline import finalize
+from mib.policy import (Calibration, apply_reference_date, corpus_revoked_sponsors,
+                        corpus_years)
+from mib.pipeline import finalize, resolve_printed_date
 from tools.build_cache import load_cache
 
 
@@ -36,6 +37,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
     reference = corpus_reference_date([r["record"] for r in good])
     revoked = corpus_revoked_sponsors([r["record"] for r in good])
     median_date = corpus_median_date([r["record"] for r in good])
+    years = corpus_years([r["record"] for r in good])
 
     out: list[dict] = []
     for row in rows:
@@ -44,8 +46,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
                 row["case_id"], lexicon, calibration, row.get("reason", "?")).to_row())
             continue
         record = apply_reference_date(row["record"], reference, revoked)
-        if record.arrival_date == "unknown" and median_date:
-            row["printed"]["arrival_date"] = median_date
+        resolve_printed_date(row["printed"], record, median_date, years)
         prediction = finalize(row["printed"], record, row["note"], calibration,
                               adjudicator=adjudicator, features=row.get("features"))
         out.append(prediction.to_row())

@@ -6,6 +6,7 @@ development, and several protect against a change that would silently *raise*
 the train score while making the system wrong.
 """
 
+from mib import pipeline, policy
 from mib.ocr import mine_literals, parse_fields
 from mib.validate import looks_damaged, valid_for_field
 
@@ -120,3 +121,70 @@ class TestInjectionSurvivesOCR:
         assert ev.note_finding is None, "an injected finding must never become a note"
         assert ev.injection_detected
         assert len(ev.hidden_texts) == 2
+
+
+def _dated(arrival):
+    """Minimal Record carrying just an arrival date."""
+    return policy.Record(case_id="X", arrival_date=arrival)
+
+
+# A corpus whose real years are 2025 and 2026, plus the misread cluster the
+# training set actually contains: 30 packets reading 2028 for 2026.
+_CORPUS = [*[_dated("2026-06-01") for _ in range(80)],
+           *[_dated("2025-11-02") for _ in range(20)],
+           *[_dated("2028-04-18") for _ in range(30)]]
+
+
+class TestArrivalYearRepair:
+    """A misread year is repairable; the repair must never become evidence."""
+
+    def test_run_stops_at_the_gap(self):
+        # 2028 holds 3.3% of the corpus and 2025 holds 5.3%, so no frequency
+        # cutoff separates them. An empty 2027 does.
+        assert set(policy.corpus_years(_CORPUS)) == {"2025", "2026"}
+
+    def test_repairs_the_dominant_candidate(self):
+        years = policy.corpus_years(_CORPUS)
+        # 2028 is one substitution from BOTH 2026 and 2025, so uniqueness alone
+        # rejects every repair; 2026 wins on the histogram. Month and day survive.
+        assert policy.repair_year("2028-04-18", years) == "2026-04-18"
+        assert policy.repair_year("2036-04-15", years) == "2026-04-15"
+
+    def test_leaves_plausible_years_alone(self):
+        years = policy.corpus_years(_CORPUS)
+        assert policy.repair_year("2026-04-18", years) is None
+        assert policy.repair_year("2025-04-18", years) is None
+
+    def test_rejects_when_no_candidate_dominates(self):
+        # Two adjacent years of equal weight cannot arbitrate between
+        # themselves, so the repair declines rather than guessing.
+        balanced = [*[_dated("2026-05-05") for _ in range(50)],
+                    *[_dated("2027-05-05") for _ in range(50)]]
+        years = policy.corpus_years(balanced)
+        assert set(years) == {"2026", "2027"}
+        assert policy.repair_year("2028-05-05", years) is None
+
+    def test_turns_itself_off_on_a_tiny_corpus(self):
+        assert policy.corpus_years([_dated("2026-01-01")]) == {}
+        assert policy.repair_year("2028-01-01", {}) is None
+
+    def test_two_substitutions_is_not_a_repair(self):
+        assert policy.repair_year("2038-04-18", policy.corpus_years(_CORPUS)) is None
+
+    def test_repair_prints_but_never_becomes_evidence(self):
+        record = _dated("2028-04-18")
+        printed = {"arrival_date": "2028-04-18"}
+        pipeline.resolve_printed_date(printed, record, "2026-06-01",
+                                      policy.corpus_years(_CORPUS))
+        assert printed["arrival_date"] == "2026-04-18"
+        # The Record the policy engine reads is untouched. 11 of the 32 repairs
+        # fix the year and still carry a wrong month or day, and a
+        # plausible-but-wrong date can make a stale packet look fresh: promoting
+        # the repair measured -0.08 classification against +0.09 extraction.
+        assert record.arrival_date == "2028-04-18"
+
+    def test_unknown_date_still_prints_the_corpus_median(self):
+        record = _dated(policy.UNKNOWN)
+        printed = {"arrival_date": "2000-01-01"}
+        pipeline.resolve_printed_date(printed, record, "2026-06-01", {})
+        assert printed["arrival_date"] == "2026-06-01"
