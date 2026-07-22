@@ -5,8 +5,8 @@ of adversarial PDF case packets and emits `predictions.jsonl`: ten extracted
 fields plus an `APPROVED` / `DENIED` / `NEEDS_REVIEW` adjudication with a
 calibrated confidence.
 
-**Score: 123.2 / 150 out-of-fold** on the 1,000 labelled training packets —
-42.6 extraction, 64.9 classification, 15.8 calibration, Brier 0.106.
+**Score: 126.17 / 150 out-of-fold** on the 1,000 labelled training packets —
+43.64 extraction, 66.42 classification, 16.12 calibration, Brier 0.097.
 
 See [`MEMO.md`](MEMO.md) for the technical write-up and [`WORKLOG.md`](WORKLOG.md)
 for the full run-by-run history, including the regressions.
