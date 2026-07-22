@@ -81,6 +81,21 @@ _NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]
 # "Disqualifying risk flag: biohazard_red." / "Review-only risk flag present: x."
 _NOTE_FLAG_RE = re.compile(r"risk flag(?:\s+present)?\s*[:;.]\s*([a-z_]+)", re.I)
 
+# Matching on the *label* is fragile: OCR drops the colon and garbles the word
+# ("Reason Disqualifying nsk flag biohazard_red"). The flag names themselves are
+# far more distinctive than the label around them -- two underscore-joined words
+# that will not occur by accident -- so scan for them directly.
+#
+# Safe against the hidden-text injection: white-on-white text is invisible in a
+# rendered raster, so OCR never sees the planted "answer key" at all.
+_FLAG_LITERALS = (
+    "memory_tampering", "planetary_embargo", "active_warrant", "biohazard_red",
+    "identity_conflict", "sponsor_mismatch", "illegible_biometrics",
+    "rescinded_denial",
+)
+_FLAG_LITERAL_RE = re.compile(
+    "|".join(name.replace("_", r"[_\s\-]?") for name in _FLAG_LITERALS), re.I)
+
 # Page furniture OCR sweeps into a value when it sits on the same scan line.
 # Left in place it turns "Solix Solquell" into "Solix Solquell SCAN IMAGE",
 # which then reads as an identity conflict against the crisp text layer.
@@ -211,6 +226,8 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
             extras["note_reason"] = note.group(2).strip()
     for match in _NOTE_FLAG_RE.finditer(text):
         flags.append(match.group(1).strip(" ."))
+    for match in _FLAG_LITERAL_RE.finditer(text):
+        flags.append(match.group(0))
 
     for line in text.splitlines():
         # Find the first separator rather than anchoring the label at the start.

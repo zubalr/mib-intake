@@ -104,6 +104,10 @@ class Record:
     # disqualifying flags we simply never saw -- it was the largest single source
     # of catastrophic false approvals in the first end-to-end run (28 of 43).
     risk_flags_known: bool = True
+    # Whether the packet contains any scanned page at all. Distinguishes "the
+    # risk panel is in here somewhere and we could not read it" from "this
+    # packet simply has no risk page", which are very different priors.
+    has_scanned_pages: bool = False
 
     def flag_set(self) -> frozenset[str]:
         return frozenset(f for f in self.risk_flags if f and f != "none")
@@ -198,11 +202,15 @@ def decision_path(record: Record) -> str:
     if record.visa_class != "DIP-1" and record.sponsor_id == UNKNOWN:
         return "sponsor_unknown"
     if not record.risk_flags_known:
-        # Never approve a packet whose risk-flag evidence we could not read. The
-        # payoff matrix charges -4 for approving a denial and pays 2 for routing
-        # it to review, so hedging is right whenever the disqualifying evidence
-        # might simply be unread.
-        return "risk_flags_unreadable"
+        # Never approve on unread risk evidence -- the payoff matrix charges -4
+        # for approving a denial and pays 2 for routing it to review.
+        #
+        # Split by *why* it is unread. A packet holding a scan we failed to
+        # parse plausibly hides a flag; a packet with no risk page at all is a
+        # different population with a much higher approval rate. Lumping them
+        # gave one mushy 230-case bucket.
+        return "risk_page_unreadable" if record.has_scanned_pages \
+            else "risk_page_absent"
     if record.fee_status == UNKNOWN:
         return "fee_unknown"
     if stale is None:

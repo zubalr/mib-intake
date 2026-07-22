@@ -6,14 +6,15 @@
   "_support": {
     "adjudicator_note_finding": 217,
     "arrival_date_untrusted": 126,
-    "clean": 154,
-    "disqualifying_flag": 86,
-    "fee_unknown": 74,
+    "clean": 29,
+    "disqualifying_flag": 88,
+    "fee_unknown": 36,
     "fee_unpaid": 32,
     "fee_waived_unjustified": 7,
-    "review_flags": 66,
+    "review_flags": 68,
     "review_flags_multi": 11,
-    "risk_flags_unreadable": 71,
+    "risk_page_absent": 105,
+    "risk_page_unreadable": 125,
     "sponsor_revoked": 52,
     "sponsor_unknown": 18,
     "stale_arrival": 29,
@@ -41,19 +42,19 @@
       "NEEDS_REVIEW": 0.316308
     },
     "clean": {
-      "APPROVED": 0.652886,
-      "DENIED": 0.143823,
-      "NEEDS_REVIEW": 0.203291
+      "APPROVED": 0.853212,
+      "DENIED": 0.052242,
+      "NEEDS_REVIEW": 0.094545
     },
     "disqualifying_flag": {
-      "APPROVED": 0.012844,
-      "DENIED": 0.952489,
-      "NEEDS_REVIEW": 0.034667
+      "APPROVED": 0.012565,
+      "DENIED": 0.953522,
+      "NEEDS_REVIEW": 0.033913
     },
     "fee_unknown": {
-      "APPROVED": 0.463538,
-      "DENIED": 0.175949,
-      "NEEDS_REVIEW": 0.360513
+      "APPROVED": 0.6539,
+      "DENIED": 0.1431,
+      "NEEDS_REVIEW": 0.203
     },
     "fee_unpaid": {
       "APPROVED": 0.059889,
@@ -66,19 +67,24 @@
       "NEEDS_REVIEW": 0.374545
     },
     "review_flags": {
-      "APPROVED": 0.045086,
-      "DENIED": 0.124629,
-      "NEEDS_REVIEW": 0.830286
+      "APPROVED": 0.043833,
+      "DENIED": 0.121167,
+      "NEEDS_REVIEW": 0.835
     },
     "review_flags_multi": {
       "APPROVED": 0.077067,
       "DENIED": 0.114933,
       "NEEDS_REVIEW": 0.808
     },
-    "risk_flags_unreadable": {
-      "APPROVED": 0.415413,
-      "DENIED": 0.222987,
-      "NEEDS_REVIEW": 0.3616
+    "risk_page_absent": {
+      "APPROVED": 0.588587,
+      "DENIED": 0.144257,
+      "NEEDS_REVIEW": 0.267156
+    },
+    "risk_page_unreadable": {
+      "APPROVED": 0.412062,
+      "DENIED": 0.230419,
+      "NEEDS_REVIEW": 0.357519
     },
     "sponsor_revoked": {
       "APPROVED": 0.0385,

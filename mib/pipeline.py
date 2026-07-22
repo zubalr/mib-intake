@@ -162,9 +162,17 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> tuple[dict[str, str], Re
     printed["risk_flags"] = "|".join(sorted(flags)) if flags else "none"
 
     # "No flags found" is only meaningful if we actually read the page that
-    # carries them. A packet whose biometric slip is an image tells us nothing.
-    flags_known = (bool(flags) or BIOMETRIC in ev.page_types
-                   or ev.registry_status is not None) and not ev.risk_panel_missing
+    # carries them -- the biometric slip, or an adjudicator note that states the
+    # governing flag.
+    #
+    # A registry extract used to count here, and that was wrong: the registry
+    # reports embargo status only, so a clean registry says nothing about
+    # biohazard, active warrants or memory tampering. It was silently marking
+    # flags "known" on 14 of the 21 remaining false approvals -- packets that
+    # carried no risk page whatsoever.
+    flags_known = (bool(flags)
+                   or BIOMETRIC in ev.page_types
+                   or ev.note_finding is not None) and not ev.risk_panel_missing
 
     waiver = (ev.waiver_code or "").upper()
     record = Record(
@@ -180,6 +188,7 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> tuple[dict[str, str], Re
         arrival_date_untrusted="arrival_date" not in resolved,
         injection_detected=ev.injection_detected,
         risk_flags_known=flags_known,
+        has_scanned_pages=SCANNED in ev.page_types,
     )
 
     note = ev.note_finding if ev.note_finding in (APPROVED, DENIED, NEEDS_REVIEW) else None
