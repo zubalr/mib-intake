@@ -85,7 +85,11 @@ def valid_for_field(field: str, value: str) -> bool:
     if field == "applicant_name":
         return valid_name(value)
     if field == "fee_status":
-        return value.casefold() in FEE_VALUES
+        # Deliberately NOT an exact membership test. OCR renders "paid" as
+        # "paig"; rejecting it here would discard a value the closed-vocabulary
+        # snapper recovers perfectly. Snapping happens in the pipeline, so this
+        # only screens out debris.
+        return len(re.sub(r"[^A-Za-z]", "", value)) >= 3
     # Closed-vocabulary fields are checked by lexicon snapping; here we only
     # reject obvious debris.
     return len(re.sub(r"[^A-Za-z0-9]", "", value)) >= 2

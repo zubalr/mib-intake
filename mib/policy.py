@@ -150,9 +150,15 @@ def decision_path(record: Record) -> str:
         return "fee_unpaid"
 
     # -- Missing / untrusted evidence -> review -----------------------------
-    if record.fee_status == UNKNOWN:
-        # 44/44 NEEDS_REVIEW.
-        return "fee_unknown"
+    # NOTE: `fee_status == unknown` is checked *late*, not here.
+    #
+    # The field manual's "unknown: needs review" is about a fee receipt that
+    # exists and is unreadable. But ~40% of packets carry no fee receipt page at
+    # all, and short-circuiting on that swallowed every other signal: 292
+    # packets with a perfectly readable disqualifying flag, revoked sponsor or
+    # stale date were routed to NEEDS_REVIEW purely because their fee page was
+    # absent. Strong evidence is now allowed to decide first, and a missing fee
+    # only decides a case that nothing else resolves.
     if record.arrival_date_untrusted or record.arrival_date == UNKNOWN:
         # "If the arrival date is missing or appears only in hidden text, mark
         # the case NEEDS_REVIEW."
@@ -193,6 +199,11 @@ def decision_path(record: Record) -> str:
     # simply be unread.
     if not record.risk_flags_known:
         return "risk_flags_unreadable"
+
+    # -- Fee evidence missing ----------------------------------------------
+    # Reached only when nothing stronger applied (see the note above).
+    if record.fee_status == UNKNOWN:
+        return "fee_unknown"
 
     # -- Review-only flags --------------------------------------------------
     if flags & REVIEW_FLAGS:

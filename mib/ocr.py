@@ -67,7 +67,25 @@ OCR_LABELS = {
     "biometric confidence": "_biometric_confidence",
 }
 
-_LINE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z ]{2,28}?)\s*[:;]\s*(.+?)\s*$")
+# The label/value separator is frequently NOT a colon after OCR: a scanned
+# "Fee Status: paid" comes back as "Fee Status. paig". Accepting only ':' threw
+# away several hundred recoverable values.
+_LINE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z ]{2,28}?)\s*[:;.,=]\s*(.+?)\s*$")
+
+# Page furniture OCR sweeps into a value when it sits on the same scan line.
+# Left in place it turns "Solix Solquell" into "Solix Solquell SCAN IMAGE",
+# which then reads as an identity conflict against the crisp text layer.
+_FURNITURE_RE = re.compile(
+    r"\b(SCAN IMAGE|REGISTRY IMAGE|PASSPORT IMAGE|CASEWORK|MIB Eyes Only"
+    r"|Synthetic hiring.*|Packet MIB-\d+.*)\b", re.I)
+
+
+def _strip_furniture(value: str) -> str:
+    value = _FURNITURE_RE.sub(" ", value)
+    # Trailing single-character debris ("Tekdane Tekmora i").
+    value = re.sub(r"\s+[^A-Za-z0-9]\s*$", "", value)
+    value = re.sub(r"\s+[a-zA-Z]$", "", value) if len(value.split()) > 2 else value
+    return " ".join(value.split()).strip(" |.,;:-_")
 # Enough of a signal to stop trying further rotations.
 _GOOD_ENOUGH = 2
 
@@ -140,7 +158,7 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
         if not match:
             continue
         label = " ".join(match.group(1).split()).casefold()
-        value = match.group(2).strip().strip("|").strip()
+        value = _strip_furniture(match.group(2))
         target = OCR_LABELS.get(label)
         if not target or not value:
             continue

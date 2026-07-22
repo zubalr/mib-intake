@@ -27,6 +27,7 @@ from mib.extract import (
     ADJUDICATOR,
     BIOMETRIC,
     MANUAL_CORRECTION,
+    SCANNED,
     PacketEvidence,
     parse_packet,
 )
@@ -81,9 +82,24 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
         flags.add("sponsor_mismatch")
 
     # Two documents naming different applicants.
-    names = {o.value.casefold() for o in ev.values("applicant_name")}
-    if len(names) > 1:
-        flags.add("identity_conflict")
+    #
+    # Deliberately conservative, and only over crisp text-layer sources. OCR of
+    # a scan renders the same name as "Veetari Tekmora" and "Vestan Tekmors",
+    # or appends page furniture ("Solix Solquell SCAN IMAGE") -- comparing those
+    # produced ~141 false identity conflicts, which cost extraction points and
+    # wrongly forced packets to NEEDS_REVIEW. A manual correction also *resolves*
+    # a conflict rather than being one, so its presence suppresses the flag.
+    if "applicant_name" not in ev.corrections:
+        crisp = set()
+        for obs in ev.values("applicant_name"):
+            if obs.source in (SCANNED, MANUAL_CORRECTION):
+                continue
+            snapped, conf = lexicon.snap_name(obs.value)
+            # Only a confidently-recognised name can evidence a conflict.
+            if conf > 0.0:
+                crisp.add(snapped.casefold())
+        if len(crisp) > 1:
+            flags.add("identity_conflict")
 
     return flags
 
@@ -130,9 +146,16 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> tuple[dict[str, str], Re
             printed[field] = lexicon.prior_mode(field)
 
     fee_raw = _resolve(ev, "fee_status")
-    fee = fee_raw.strip().lower() if fee_raw else UNKNOWN
-    if fee not in FEE_VALUES:
-        fee = UNKNOWN
+    fee = UNKNOWN
+    if fee_raw:
+        candidate = fee_raw.strip().lower()
+        if candidate not in FEE_VALUES:
+            # Snap onto the closed vocabulary before giving up: an OCR'd
+            # "paig"/"waivec" is a perfectly recoverable "paid"/"waived".
+            snapped, conf = lexicon.snap("fee_status", candidate)
+            candidate = snapped.lower() if conf > 0.0 else candidate
+        if candidate in FEE_VALUES:
+            fee = candidate
     printed["fee_status"] = fee
 
     flags = _derive_risk_flags(ev, lexicon)

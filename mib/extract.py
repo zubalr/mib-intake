@@ -233,6 +233,13 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
 
     visible_total = 0
     scanned_pages: list[int] = []
+    # Which pages carry a raster worth OCRing. Small decorative images (the
+    # portrait thumbnails) are ignored -- only page-sized scans hold field text.
+    page_images: dict[int, bool] = {}
+    with fitz.open(path) as probe:
+        for index, page in enumerate(probe):
+            page_images[index] = any(
+                int(img[2]) * int(img[3]) >= 400_000 for img in page.get_images(full=True))
 
     for page_no in sorted(by_page):
         page_spans = by_page[page_no]
@@ -287,17 +294,23 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                             TRUST_ORDER[MANUAL_CORRECTION], page_no)
                     ev.corrections[target] = _clean(correction.group(2))
 
+        before = len(ev.observations)
         _parse_labelled_fields(ev, visible, kind, trust, page_no)
         _parse_inline_fields(ev, visible, kind, trust, page_no)
 
         if kind == SPONSOR:
             _parse_sponsor_letter(ev, visible, page_no)
 
-        # A page whose only text is the boilerplate footer is a scan. Its field
-        # content exists solely as pixels, so OCR it or lose those fields.
-        content = [s for s in visible
-                   if "Synthetic hiring" not in s.text and "/ page" not in s.text]
-        if len(content) <= 1 and ocr_module.available():
+        # OCR any page that yielded no field values but carries a raster.
+        #
+        # Triggering on "almost no text at all" is not enough: a scanned page
+        # often keeps a crisp text-layer title and header ("MIB Fee Receipt",
+        # "MIB-000003 | MIB Eyes Only") while every *value* exists only as
+        # pixels. Those pages have 2+ text spans, so a sparse-text trigger skips
+        # them -- which silently lost ~400 fee_status values.
+        produced_values = len(ev.observations) > before
+        has_raster = bool(page_images.get(page_no))
+        if not produced_values and has_raster and ocr_module.available():
             scanned_pages.append(page_no)
 
     if scanned_pages:
