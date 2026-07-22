@@ -133,12 +133,22 @@ def _is_stale(record: Record) -> bool | None:
 def decision_path(record: Record) -> str:
     """Name the policy rule that governs this case.
 
-    Order matters: it encodes precedence. Disqualifying conditions are checked
-    before review conditions, which are checked before the clean path.
+    **Ordered by evidential strength, not by the order FIELD_MANUAL.md lists its
+    rules.** Every path that fires on evidence we can *see* is checked before
+    any path that fires on evidence that is *missing*.
+
+    That distinction is the single most valuable structural property of this
+    function, and it was learned the hard way twice. Checking a missing-evidence
+    rule early makes it a short-circuit that swallows everything downstream: an
+    absent fee receipt alone was hiding 292 packets that carried a perfectly
+    readable disqualifying flag, revoked sponsor or stale date. A missing field
+    is the *weakest* thing a packet can tell us, so it must decide last.
     """
     flags = record.flag_set()
+    visa_known = record.visa_class != UNKNOWN
 
-    # -- Hard denials (each 100% pure on the training labels) ---------------
+    # === TIER 1: present evidence, disqualifying ============================
+    # Each of these was 100% pure on the training labels.
     if record.visa_class == "TRANSIT-7":
         # "transit only; work authorization should usually be denied" -- 53/53.
         return "transit_7"
@@ -149,67 +159,56 @@ def decision_path(record: Record) -> str:
         # 50/50 DENIED. A visible hardship waiver is the documented exception.
         return "fee_unpaid"
 
-    # -- Missing / untrusted evidence -> review -----------------------------
-    # NOTE: `fee_status == unknown` is checked *late*, not here.
-    #
-    # The field manual's "unknown: needs review" is about a fee receipt that
-    # exists and is unreadable. But ~40% of packets carry no fee receipt page at
-    # all, and short-circuiting on that swallowed every other signal: 292
-    # packets with a perfectly readable disqualifying flag, revoked sponsor or
-    # stale date were routed to NEEDS_REVIEW purely because their fee page was
-    # absent. Strong evidence is now allowed to decide first, and a missing fee
-    # only decides a case that nothing else resolves.
-    if record.arrival_date_untrusted or record.arrival_date == UNKNOWN:
-        # "If the arrival date is missing or appears only in hidden text, mark
-        # the case NEEDS_REVIEW."
-        return "arrival_date_untrusted"
-    if record.visa_class == UNKNOWN:
-        return "visa_unknown"
-
-    # -- Sponsor ------------------------------------------------------------
-    # DIP-1 is exempt from the sponsor requirement.
-    if record.visa_class != "DIP-1":
-        if record.sponsor_id == UNKNOWN:
-            return "sponsor_unknown"
+    # === TIER 2: present evidence, adverse ==================================
+    # DIP-1 is exempt from the sponsor requirement, so a revoked sponsor is only
+    # disqualifying for other classes. An unknown visa class is not treated as
+    # DIP-1 here -- that would be the exemption granting itself.
+    if visa_known and record.visa_class != "DIP-1" and record.sponsor_id != UNKNOWN:
         if record.sponsor_revoked_in_packet or record.sponsor_id in REVOKED_SPONSORS:
             # ~85% DENIED; the approved minority is the documented
             # "visible adjudicator stamp wins" precedence rule.
             return "sponsor_revoked_override" if record.has_approval_override \
                 else "sponsor_revoked"
 
-    # -- Fee/visa consistency ----------------------------------------------
-    if record.fee_status == "waived" and record.visa_class != "DIP-1" \
-            and not record.has_hardship_waiver:
+    if flags & REVIEW_FLAGS:
+        # Never APPROVED in training. Multiple review flags escalate.
+        return "review_flags_multi" if len(flags & REVIEW_FLAGS) > 1 else "review_flags"
+
+    if record.fee_status == "waived" and visa_known \
+            and record.visa_class != "DIP-1" and not record.has_hardship_waiver:
         # "waived: acceptable only for DIP-1 or a visible hardship waiver."
         return "fee_waived_unjustified"
 
-    # -- Staleness ----------------------------------------------------------
+    # Staleness needs a readable arrival date, so it is present-evidence by
+    # construction. `None` means undeterminable and falls through to tier 3.
     stale = _is_stale(record)
     if stale is True:
         if record.visa_class == "DIP-1" and record.has_diplomatic_note:
             return "stale_dip_exempt"
         return "stale_arrival"
+
+    # === TIER 3: missing evidence ===========================================
+    # Nothing visible decided the case, so now the gaps get a say.
+    if record.arrival_date_untrusted or record.arrival_date == UNKNOWN:
+        # "If the arrival date is missing or appears only in hidden text, mark
+        # the case NEEDS_REVIEW."
+        return "arrival_date_untrusted"
+    if not visa_known:
+        return "visa_unknown"
+    if record.visa_class != "DIP-1" and record.sponsor_id == UNKNOWN:
+        return "sponsor_unknown"
+    if not record.risk_flags_known:
+        # Never approve a packet whose risk-flag evidence we could not read. The
+        # payoff matrix charges -4 for approving a denial and pays 2 for routing
+        # it to review, so hedging is right whenever the disqualifying evidence
+        # might simply be unread.
+        return "risk_flags_unreadable"
+    if record.fee_status == UNKNOWN:
+        return "fee_unknown"
     if stale is None:
         return "staleness_indeterminate"
 
-    # -- Unread risk evidence ----------------------------------------------
-    # Never approve a packet whose risk-flag evidence we could not read. The
-    # payoff matrix charges -4 for approving a denial and pays 2 for routing it
-    # to review, so hedging is correct whenever the disqualifying evidence might
-    # simply be unread.
-    if not record.risk_flags_known:
-        return "risk_flags_unreadable"
-
-    # -- Fee evidence missing ----------------------------------------------
-    # Reached only when nothing stronger applied (see the note above).
-    if record.fee_status == UNKNOWN:
-        return "fee_unknown"
-
-    # -- Review-only flags --------------------------------------------------
-    if flags & REVIEW_FLAGS:
-        # Never APPROVED in training. Multiple review flags escalate.
-        return "review_flags_multi" if len(flags & REVIEW_FLAGS) > 1 else "review_flags"
-
+    # === TIER 4: nothing adverse found ======================================
     if record.injection_detected:
         # Clean on the merits, but the packet was adversarial. Held separately
         # so calibration can tell us whether that alone predicts trouble.
