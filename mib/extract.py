@@ -200,6 +200,8 @@ class PacketEvidence:
     sponsor_letter_class: str | None = None
     has_text_layer: bool = True
     ocr_pages: int = 0
+    note_from_ocr: bool = False
+    risk_panel_missing: bool = False
 
     def values(self, field_name: str) -> list[Observation]:
         """Observations for a field, most trusted first."""
@@ -329,6 +331,16 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                     ev.registry_status = extras["registry_status"]
                 if extras.get("waiver_code") and ev.waiver_code is None:
                     ev.waiver_code = extras["waiver_code"]
+                # A scanned adjudicator note is still the top evidence tier.
+                # Text-layer notes win if both exist.
+                if extras.get("note_finding") and ev.note_finding is None:
+                    ev.note_finding = extras["note_finding"]
+                    ev.note_reason = extras.get("note_reason", "")
+                    ev.note_from_ocr = True
+                # An explicitly missing risk panel is unread evidence, not
+                # "no flags" -- the distinction that governs false approvals.
+                if "RISK PANEL MISSING" in text.upper():
+                    ev.risk_panel_missing = True
                 ev.page_types.append(SCANNED)
         finally:
             doc.close()

@@ -70,7 +70,16 @@ OCR_LABELS = {
 # The label/value separator is frequently NOT a colon after OCR: a scanned
 # "Fee Status: paid" comes back as "Fee Status. paig". Accepting only ':' threw
 # away several hundred recoverable values.
-_LINE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z ]{2,28}?)\s*[:;.,=]\s*(.+?)\s*$")
+# First label/value separator on a line. ':' is frequently misread as '.', ';'
+# or '=' on a scan ("Fee Status. paig"), so all are accepted.
+_SEP_RE = re.compile(r"\s*[:;.=]\s*")
+
+# An adjudicator note recovered from a scanned page. The finding word itself is
+# usually crisp (it is set in a larger face) even when the surrounding text is not.
+_NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]?\s*(.+)",
+                      re.I)
+# "Disqualifying risk flag: biohazard_red." / "Review-only risk flag present: x."
+_NOTE_FLAG_RE = re.compile(r"risk flag(?:\s+present)?\s*[:;.]\s*([a-z_]+)", re.I)
 
 # Page furniture OCR sweeps into a value when it sits on the same scan line.
 # Left in place it turns "Solix Solquell" into "Solix Solquell SCAN IMAGE",
@@ -142,24 +151,74 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[str, int]:
     return best_text, best_rot
 
 
+def _match_label(raw: str) -> str | None:
+    """Fuzzy-match the text preceding a separator against the known labels.
+
+    Anchoring a strict regex at the start of the line discarded a large share of
+    perfectly readable values: scans routinely prefix a line with table rules or
+    stray marks, producing ``| Observed flags: illegible_biometrics | | |``,
+    ``A) Observed flags: biohazard_red`` and ``(Cbeerved flags: ...``. All three
+    were dropped outright even though the value itself was clean.
+
+    So strip non-letter noise, keep the trailing words, and tolerate a garbled
+    label -- ``Cbeerved flags`` should still resolve to "observed flags".
+    """
+    cleaned = re.sub(r"[^A-Za-z ]+", " ", raw).strip().casefold()
+    if not cleaned:
+        return None
+    words = cleaned.split()
+
+    # Longest trailing word-group first, so "observed flags" beats the bare
+    # "flags" left behind by a partly-eaten label.
+    for size in (3, 2, 1):
+        if len(words) >= size:
+            candidate = " ".join(words[-size:])
+            if candidate in OCR_LABELS:
+                return OCR_LABELS[candidate]
+
+    tail = " ".join(words[-2:]) if len(words) >= 2 else words[-1]
+    best, best_dist = None, 10**9
+    for label, target in OCR_LABELS.items():
+        if abs(len(label) - len(tail)) > 4:
+            continue
+        dist = sum(1 for a, b in zip(label, tail) if a != b) + abs(len(label) - len(tail))
+        if dist < best_dist:
+            best, best_dist = target, dist
+    return best if best is not None and best_dist <= max(2, len(tail) // 4) else None
+
+
 def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
     """Parse OCR text into (fields, observed_flags, extras).
 
     `extras` carries non-scored signals the policy layer wants (registry status,
-    waiver code). Values are returned raw; snapping onto the closed vocabulary
-    is the caller's job, so OCR noise is corrected in exactly one place.
+    waiver code, and any adjudicator finding recovered from a scanned note).
+    Values are returned raw; snapping onto the closed vocabulary is the caller's
+    job, so OCR noise is corrected in exactly one place.
     """
     fields: dict[str, str] = {}
     flags: list[str] = []
     extras: dict[str, str] = {}
 
+    # An adjudicator note that happens to be scanned is still an adjudicator
+    # note -- the top evidence tier, and 162/162 correct wherever the text layer
+    # carried one. Its stated reason also names the governing risk flag, which
+    # is often the only place that flag survives on a damaged packet.
+    note = _NOTE_RE.search(text)
+    if note:
+        finding = note.group(1).upper().strip(" .")
+        if finding in ("APPROVED", "DENIED", "NEEDS_REVIEW"):
+            extras["note_finding"] = finding
+            extras["note_reason"] = note.group(2).strip()
+    for match in _NOTE_FLAG_RE.finditer(text):
+        flags.append(match.group(1).strip(" ."))
+
     for line in text.splitlines():
-        match = _LINE_RE.match(line)
-        if not match:
+        # Find the first separator rather than anchoring the label at the start.
+        sep = _SEP_RE.search(line)
+        if not sep:
             continue
-        label = " ".join(match.group(1).split()).casefold()
-        value = _strip_furniture(match.group(2))
-        target = OCR_LABELS.get(label)
+        target = _match_label(line[: sep.start()])
+        value = _strip_furniture(line[sep.end():])
         if not target or not value:
             continue
 

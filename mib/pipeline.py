@@ -163,8 +163,8 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> tuple[dict[str, str], Re
 
     # "No flags found" is only meaningful if we actually read the page that
     # carries them. A packet whose biometric slip is an image tells us nothing.
-    flags_known = bool(flags) or BIOMETRIC in ev.page_types \
-        or ev.registry_status is not None
+    flags_known = (bool(flags) or BIOMETRIC in ev.page_types
+                   or ev.registry_status is not None) and not ev.risk_panel_missing
 
     waiver = (ev.waiver_code or "").upper()
     record = Record(

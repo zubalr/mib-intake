@@ -1,29 +1,28 @@
 {
   "_n_rows": 1000,
-  "_note_accuracy_raw": "162/162",
+  "_note_accuracy_raw": "217/217",
   "_prior_strength": 4.0,
   "_source": "fitted by running the real pipeline over the labelled training set",
   "_support": {
-    "adjudicator_note_finding": 162,
-    "arrival_date_untrusted": 161,
+    "adjudicator_note_finding": 217,
+    "arrival_date_untrusted": 126,
     "clean": 154,
-    "clean_injection_seen": 1,
-    "disqualifying_flag": 75,
-    "fee_unknown": 80,
+    "disqualifying_flag": 86,
+    "fee_unknown": 74,
     "fee_unpaid": 32,
     "fee_waived_unjustified": 7,
-    "review_flags": 62,
-    "review_flags_multi": 13,
-    "risk_flags_unreadable": 87,
-    "sponsor_revoked": 51,
-    "sponsor_unknown": 15,
-    "stale_arrival": 30,
+    "review_flags": 66,
+    "review_flags_multi": 11,
+    "risk_flags_unreadable": 71,
+    "sponsor_revoked": 52,
+    "sponsor_unknown": 18,
+    "stale_arrival": 29,
     "stale_dip_exempt": 2,
-    "transit_7": 34,
-    "visa_unknown": 34
+    "transit_7": 33,
+    "visa_unknown": 22
   },
   "accuracies": {
-    "adjudicator_note_finding": 0.993902
+    "adjudicator_note_finding": 0.995434
   },
   "fallback": {
     "APPROVED": 0.289,
@@ -32,74 +31,69 @@
   },
   "paths": {
     "adjudicator_note_finding": {
-      "APPROVED": 0.205759,
-      "DENIED": 0.486289,
-      "NEEDS_REVIEW": 0.307952
+      "APPROVED": 0.2179,
+      "DENIED": 0.473864,
+      "NEEDS_REVIEW": 0.308235
     },
     "arrival_date_untrusted": {
-      "APPROVED": 0.285794,
-      "DENIED": 0.386206,
-      "NEEDS_REVIEW": 0.328
+      "APPROVED": 0.308892,
+      "DENIED": 0.3748,
+      "NEEDS_REVIEW": 0.316308
     },
     "clean": {
       "APPROVED": 0.652886,
-      "DENIED": 0.150152,
-      "NEEDS_REVIEW": 0.196962
-    },
-    "clean_injection_seen": {
-      "APPROVED": 0.2312,
-      "DENIED": 0.3448,
-      "NEEDS_REVIEW": 0.424
+      "DENIED": 0.143823,
+      "NEEDS_REVIEW": 0.203291
     },
     "disqualifying_flag": {
-      "APPROVED": 0.014633,
-      "DENIED": 0.945873,
-      "NEEDS_REVIEW": 0.039494
+      "APPROVED": 0.012844,
+      "DENIED": 0.952489,
+      "NEEDS_REVIEW": 0.034667
     },
     "fee_unknown": {
-      "APPROVED": 0.478048,
-      "DENIED": 0.199095,
-      "NEEDS_REVIEW": 0.322857
+      "APPROVED": 0.463538,
+      "DENIED": 0.175949,
+      "NEEDS_REVIEW": 0.360513
     },
     "fee_unpaid": {
-      "APPROVED": 0.087667,
-      "DENIED": 0.825667,
+      "APPROVED": 0.059889,
+      "DENIED": 0.853444,
       "NEEDS_REVIEW": 0.086667
     },
     "fee_waived_unjustified": {
-      "APPROVED": 0.377818,
+      "APPROVED": 0.286909,
       "DENIED": 0.338545,
-      "NEEDS_REVIEW": 0.283636
+      "NEEDS_REVIEW": 0.374545
     },
     "review_flags": {
-      "APPROVED": 0.047818,
-      "DENIED": 0.132182,
-      "NEEDS_REVIEW": 0.82
+      "APPROVED": 0.045086,
+      "DENIED": 0.124629,
+      "NEEDS_REVIEW": 0.830286
     },
     "review_flags_multi": {
-      "APPROVED": 0.068,
-      "DENIED": 0.160235,
-      "NEEDS_REVIEW": 0.771765
+      "APPROVED": 0.077067,
+      "DENIED": 0.114933,
+      "NEEDS_REVIEW": 0.808
     },
     "risk_flags_unreadable": {
-      "APPROVED": 0.331385,
-      "DENIED": 0.304659,
-      "NEEDS_REVIEW": 0.363956
+      "APPROVED": 0.415413,
+      "DENIED": 0.222987,
+      "NEEDS_REVIEW": 0.3616
     },
     "sponsor_revoked": {
-      "APPROVED": 0.0392,
-      "DENIED": 0.940436,
-      "NEEDS_REVIEW": 0.020364
+      "APPROVED": 0.0385,
+      "DENIED": 0.923643,
+      "NEEDS_REVIEW": 0.037857
     },
     "sponsor_unknown": {
-      "APPROVED": 0.271368,
-      "DENIED": 0.353895,
-      "NEEDS_REVIEW": 0.374737
+      "APPROVED": 0.416182,
+      "DENIED": 0.305636,
+      "NEEDS_REVIEW": 0.278182
     },
     "stale_arrival": {
-      "APPROVED": 0.269294,
-      "DENIED": 0.668353,
-      "NEEDS_REVIEW": 0.062353
+      "APPROVED": 0.277455,
+      "DENIED": 0.658303,
+      "NEEDS_REVIEW": 0.064242
     },
     "stale_dip_exempt": {
       "APPROVED": 0.526,
@@ -107,9 +101,9 @@
       "NEEDS_REVIEW": 0.186667
     },
     "transit_7": {
-      "APPROVED": 0.030421,
-      "DENIED": 0.913789,
-      "NEEDS_REVIEW": 0.055789
+      "APPROVED": 0.031243,
+      "DENIED": 0.911459,
+      "NEEDS_REVIEW": 0.057297
     },
     "unreadable_packet": {
       "APPROVED": 0.12,
@@ -117,9 +111,9 @@
       "NEEDS_REVIEW": 0.6
     },
     "visa_unknown": {
-      "APPROVED": 0.504105,
-      "DENIED": 0.229579,
-      "NEEDS_REVIEW": 0.266316
+      "APPROVED": 0.506,
+      "DENIED": 0.220154,
+      "NEEDS_REVIEW": 0.273846
     }
   }
 }

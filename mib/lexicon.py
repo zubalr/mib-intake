@@ -222,4 +222,18 @@ class Lexicon:
 
     def snap_flag(self, observed: str, max_ratio: float = 0.3) -> tuple[str, float]:
         all_flags = tuple(sorted(self.disqualifying_flags | self.review_flags))
-        return self._snap_to(all_flags, observed, max_ratio)
+        value, conf = self._snap_to(all_flags, observed, max_ratio)
+        if conf > 0.0:
+            return value, conf
+
+        # Truncation is a distinct failure from substitution and edit distance
+        # handles it badly: a scan clipped at the column edge yields
+        # "illegible_bio", which is 7 deletions from "illegible_biometrics" and
+        # so fails any sane threshold -- yet it is unambiguous. Accept a
+        # sufficiently long, uniquely-matching prefix.
+        obs = _canon(observed)
+        if len(obs) >= 6:
+            matches = [f for f in all_flags if _canon(f).startswith(obs)]
+            if len(matches) == 1:
+                return matches[0], min(0.75, len(obs) / len(_canon(matches[0])))
+        return value, conf
