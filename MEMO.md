@@ -157,7 +157,37 @@ are packets with no fee receipt page at all** — unreachable by any OCR work.
 Since unrecoverable fields leave the denominator in the private labels, the
 extraction score there should read *higher* than the training figure.
 
-## 7. Runtime and reproducibility
+## 7. Does it generalize? The validation drift check
+
+The validation labels are private, so the score there cannot be measured. What
+can be measured is whether the system *behaves* the same on 5,000 unseen
+packets. The result that matters most:
+
+```
+species_code  12 distinct, 0 new     declared_purpose  10 distinct, 0 new
+home_world    13 distinct, 0 new     fee_status         4 distinct, 0 new
+visa_class     5 distinct, 0 new     risk_flags         9 tokens,   0 new
+```
+
+**Zero new values in any closed vocabulary.** The whole extraction design rests
+on the claim that these fields are closed sets and extraction is snapping rather
+than transcription. This is that claim tested on five times the data it was
+derived from, and it holds exactly.
+
+Mean confidence is 0.761 on train and 0.762 on validation — the calibration
+transfers. Fallback rates run 2–4 points higher and the adjudication mix shifts
+toward DENIED and NEEDS_REVIEW; those are one effect, not two. Validation
+packets are somewhat more damaged, so the system recovers less and correctly
+becomes more cautious when it has read less. That is the intended behaviour, and
+it is the opposite of a system that quietly gets confident on inputs it does not
+understand.
+
+One more generalization signal worth naming: the staleness reference resolved to
+**2026-08-20** on validation against **2026-07-10** on train. It is derived from
+the corpus being scored rather than hardcoded, which is exactly what lets the
+staleness rule survive a private set from another period.
+
+## 8. Runtime and reproducibility
 
 1.77 s/PDF in-container under the real scoring flags (`--network none --cpus 4
 --memory 8g --read-only --tmpfs /tmp`), against a 6 s budget; the 5,000-packet
