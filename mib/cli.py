@@ -91,21 +91,44 @@ def process_one(pdf_path_str: str) -> dict:
     previous = signal.signal(signal.SIGALRM, _timeout)
     signal.alarm(PER_PDF_TIMEOUT_S)
     try:
-        from mib.pipeline import build_prediction  # imported late; see pipeline.py
-        prediction = build_prediction(pdf_path, _LEXICON, _CALIBRATION)
+        from mib.pipeline import extract_packet
+        printed, record, note = extract_packet(pdf_path, _LEXICON)
+        return {"case_id": case_id, "printed": printed,
+                "record": record, "note": note, "failed": False}
     except BaseException as exc:  # noqa: BLE001 -- a dropped case is never correct
-        prediction = fallback_prediction(
-            case_id, _LEXICON, _CALIBRATION,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
         print(f"[warn] {case_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
         if os.environ.get("MIB_DEBUG"):
             traceback.print_exc()
+        return {"case_id": case_id, "failed": True,
+                "reason": f"{type(exc).__name__}: {exc}"}
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
 
-    return prediction.to_row() | {"_debug": prediction.debug}
+
+def corpus_reference_date(records) -> str:
+    """Approximate packet receipt date for the staleness rule.
+
+    Packets carry only an arrival date -- there is no receipt date to read (the
+    forensics pass found exactly one date per packet). Rather than hardcode a
+    constant fitted to the public corpus, take the latest arrival date actually
+    present in the set being scored: intake cannot receive a packet before the
+    applicant arrives, so the newest arrival is a lower bound on "now" for this
+    corpus. A private test set from a different period then still works.
+    """
+    import datetime as dt
+    dates = []
+    for rec in records:
+        value = getattr(rec, "arrival_date", None)
+        if not value or value == "unknown":
+            continue
+        try:
+            dates.append(dt.date.fromisoformat(value))
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        return "2026-07-15"
+    return max(dates).isoformat()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,16 +159,35 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 row = future.result()
             except BaseException as exc:  # noqa: BLE001 -- worker died outright
-                _worker_init()
-                assert _LEXICON is not None and _CALIBRATION is not None
-                row = fallback_prediction(
-                    pdf.stem, _LEXICON, _CALIBRATION,
-                    reason=f"worker died: {type(exc).__name__}",
-                ).to_row()
+                row = {"case_id": pdf.stem, "failed": True,
+                       "reason": f"worker died: {type(exc).__name__}"}
                 print(f"[warn] {pdf.stem}: worker died: {exc}", file=sys.stderr)
             rows[row["case_id"]] = row
             if done % 250 == 0:
                 print(f"[info] {done}/{len(pdfs)}", file=sys.stderr)
+
+    # Phase 2: adjudicate. Cheap and in-process, so it can use corpus-level
+    # context that a per-packet worker could not see.
+    _worker_init()
+    assert _LEXICON is not None and _CALIBRATION is not None
+    from mib.pipeline import finalize
+
+    good = [r for r in rows.values() if not r.get("failed")]
+    reference = corpus_reference_date([r["record"] for r in good])
+    print(f"[info] staleness reference date: {reference}", file=sys.stderr)
+
+    final: dict[str, dict] = {}
+    for case_id, row in rows.items():
+        if row.get("failed"):
+            final[case_id] = fallback_prediction(
+                case_id, _LEXICON, _CALIBRATION, row.get("reason", "?")).to_row()
+            continue
+        record = row["record"]
+        if record.receipt_date is None:
+            record.receipt_date = reference
+        final[case_id] = finalize(
+            row["printed"], record, row["note"], _CALIBRATION).to_row()
+    rows = final
 
     # Belt and braces: assert one row per input PDF before writing.
     missing = [p.stem for p in pdfs if p.stem not in rows]

@@ -97,6 +97,12 @@ class Record:
     has_approval_override: bool = False   # signed approval superseding a denial
     arrival_date_untrusted: bool = False  # date present only in hidden text
     injection_detected: bool = False
+    # Whether we actually READ the risk-flag evidence. An empty flag set means
+    # two very different things: "the biometric slip says none" versus "the slip
+    # was an image we could not read". Conflating them approves packets whose
+    # disqualifying flags we simply never saw -- it was the largest single source
+    # of catastrophic false approvals in the first end-to-end run (28 of 43).
+    risk_flags_known: bool = True
 
     def flag_set(self) -> frozenset[str]:
         return frozenset(f for f in self.risk_flags if f and f != "none")
@@ -179,6 +185,14 @@ def decision_path(record: Record) -> str:
     if stale is None:
         return "staleness_indeterminate"
 
+    # -- Unread risk evidence ----------------------------------------------
+    # Never approve a packet whose risk-flag evidence we could not read. The
+    # payoff matrix charges -4 for approving a denial and pays 2 for routing it
+    # to review, so hedging is correct whenever the disqualifying evidence might
+    # simply be unread.
+    if not record.risk_flags_known:
+        return "risk_flags_unreadable"
+
     # -- Review-only flags --------------------------------------------------
     if flags & REVIEW_FLAGS:
         # Never APPROVED in training. Multiple review flags escalate.
@@ -215,9 +229,17 @@ class Calibration:
             payload = json.load(f)
         self.paths: dict[str, dict[str, float]] = payload["paths"]
         self.fallback: dict[str, float] = payload["fallback"]
+        # Paths where the decision is dictated by evidence rather than by the
+        # EV argmax (an adjudicator note states the finding outright). For those
+        # the useful calibration number is "how often is that evidence right",
+        # not an outcome distribution.
+        self.accuracies: dict[str, float] = payload.get("accuracies", {})
 
     def probs(self, path: str) -> dict[str, float]:
         return self.paths.get(path, self.fallback)
+
+    def accuracy(self, path: str, default: float = 0.9) -> float:
+        return self.accuracies.get(path, default)
 
     def adjudicate(self, record: Record) -> tuple[str, float, str]:
         path = decision_path(record)

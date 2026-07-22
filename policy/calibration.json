@@ -1,18 +1,28 @@
 {
   "_n_rows": 1000,
+  "_note_accuracy_raw": "162/162",
   "_prior_strength": 4.0,
-  "_source": "fitted on public data/train_labels.csv via tools/fit_calibration.py",
+  "_source": "fitted by running the real pipeline over the labelled training set",
   "_support": {
-    "clean": 265,
-    "disqualifying_flag": 186,
-    "fee_unknown": 44,
-    "fee_unpaid": 50,
-    "fee_waived_unjustified": 94,
-    "review_flags": 162,
-    "review_flags_multi": 22,
-    "sponsor_revoked": 79,
-    "stale_arrival": 45,
-    "transit_7": 53
+    "adjudicator_note_finding": 162,
+    "arrival_date_untrusted": 48,
+    "clean": 142,
+    "disqualifying_flag": 63,
+    "fee_unknown": 412,
+    "fee_unpaid": 25,
+    "fee_waived_unjustified": 4,
+    "review_flags": 23,
+    "review_flags_multi": 4,
+    "risk_flags_unreadable": 27,
+    "sponsor_revoked": 26,
+    "sponsor_unknown": 1,
+    "stale_arrival": 17,
+    "stale_dip_exempt": 2,
+    "transit_7": 27,
+    "visa_unknown": 17
+  },
+  "accuracies": {
+    "adjudicator_note_finding": 0.993902
   },
   "fallback": {
     "APPROVED": 0.289,
@@ -20,60 +30,90 @@
     "NEEDS_REVIEW": 0.28
   },
   "paths": {
+    "adjudicator_note_finding": {
+      "APPROVED": 0.205759,
+      "DENIED": 0.486289,
+      "NEEDS_REVIEW": 0.307952
+    },
+    "arrival_date_untrusted": {
+      "APPROVED": 0.310692,
+      "DENIED": 0.417769,
+      "NEEDS_REVIEW": 0.271538
+    },
     "clean": {
-      "APPROVED": 0.889056,
-      "DENIED": 0.039866,
-      "NEEDS_REVIEW": 0.071078
+      "APPROVED": 0.644904,
+      "DENIED": 0.155644,
+      "NEEDS_REVIEW": 0.199452
     },
     "disqualifying_flag": {
-      "APPROVED": 0.006084,
-      "DENIED": 0.988021,
-      "NEEDS_REVIEW": 0.005895
+      "APPROVED": 0.017254,
+      "DENIED": 0.936179,
+      "NEEDS_REVIEW": 0.046567
     },
     "fee_unknown": {
-      "APPROVED": 0.024083,
-      "DENIED": 0.035917,
-      "NEEDS_REVIEW": 0.94
+      "APPROVED": 0.284029,
+      "DENIED": 0.35751,
+      "NEEDS_REVIEW": 0.358462
     },
     "fee_unpaid": {
-      "APPROVED": 0.021407,
-      "DENIED": 0.957852,
-      "NEEDS_REVIEW": 0.020741
+      "APPROVED": 0.074345,
+      "DENIED": 0.818069,
+      "NEEDS_REVIEW": 0.107586
     },
     "fee_waived_unjustified": {
-      "APPROVED": 0.389347,
-      "DENIED": 0.129837,
-      "NEEDS_REVIEW": 0.480816
+      "APPROVED": 0.2695,
+      "DENIED": 0.2155,
+      "NEEDS_REVIEW": 0.515
     },
     "review_flags": {
-      "APPROVED": 0.006964,
-      "DENIED": 0.076651,
-      "NEEDS_REVIEW": 0.916386
+      "APPROVED": 0.116889,
+      "DENIED": 0.100889,
+      "NEEDS_REVIEW": 0.782222
     },
     "review_flags_multi": {
-      "APPROVED": 0.044462,
-      "DENIED": 0.220154,
-      "NEEDS_REVIEW": 0.735385
+      "APPROVED": 0.1445,
+      "DENIED": 0.2155,
+      "NEEDS_REVIEW": 0.64
+    },
+    "risk_flags_unreadable": {
+      "APPROVED": 0.424387,
+      "DENIED": 0.378194,
+      "NEEDS_REVIEW": 0.197419
     },
     "sponsor_revoked": {
-      "APPROVED": 0.013928,
-      "DENIED": 0.972578,
-      "NEEDS_REVIEW": 0.013494
+      "APPROVED": 0.038533,
+      "DENIED": 0.924133,
+      "NEEDS_REVIEW": 0.037333
+    },
+    "sponsor_unknown": {
+      "APPROVED": 0.2312,
+      "DENIED": 0.5448,
+      "NEEDS_REVIEW": 0.224
     },
     "stale_arrival": {
-      "APPROVED": 0.309306,
-      "DENIED": 0.606612,
-      "NEEDS_REVIEW": 0.084082
+      "APPROVED": 0.340762,
+      "DENIED": 0.605905,
+      "NEEDS_REVIEW": 0.053333
+    },
+    "stale_dip_exempt": {
+      "APPROVED": 0.526,
+      "DENIED": 0.287333,
+      "NEEDS_REVIEW": 0.186667
     },
     "transit_7": {
-      "APPROVED": 0.020281,
-      "DENIED": 0.96007,
-      "NEEDS_REVIEW": 0.019649
+      "APPROVED": 0.03729,
+      "DENIED": 0.926581,
+      "NEEDS_REVIEW": 0.036129
     },
     "unreadable_packet": {
       "APPROVED": 0.12,
       "DENIED": 0.28,
       "NEEDS_REVIEW": 0.6
+    },
+    "visa_unknown": {
+      "APPROVED": 0.388381,
+      "DENIED": 0.32019,
+      "NEEDS_REVIEW": 0.291429
     }
   }
 }
