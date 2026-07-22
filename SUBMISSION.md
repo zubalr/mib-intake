@@ -27,13 +27,13 @@ docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
 
 | | |
 | --- | --- |
-| Out-of-fold score on train | **126.03 ± 0.10 / 150** |
-| Extraction / classification / calibration | 43.73 / 66.24 / 16.05 |
-| Mean Brier | 0.099 |
+| Out-of-fold score on train | **126.00 ± 0.10 / 150** |
+| Extraction / classification / calibration | 43.73 / 66.20 / 16.07 |
+| Mean Brier | 0.098 |
 | Catastrophic false approvals | 18 / 1,000 |
 | Runtime | 1.77 s/PDF in-container (budget 6 s) |
 | Image size | 1.19 GB (limit 4 GiB) |
-| Model artifact | 1.5 MB (limit 250 MiB) |
+| Model artifact | 112 KB (limit 250 MiB) |
 
 Approach: trust-ranked evidence extraction implementing `FIELD_MANUAL.md`
 precedence, closed-vocabulary snapping with OCR-aware edit distance, structural

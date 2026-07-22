@@ -1,7 +1,7 @@
 # MIB Doc Challenge — Technical Memo
 
-**126.03 ± 0.10 / 150 out-of-fold** on the 1,000 labelled training packets —
-43.73 extraction, 66.24 classification, 16.05 calibration, Brier 0.099, 18
+**126.00 ± 0.10 / 150 out-of-fold** on the 1,000 labelled training packets —
+43.73 extraction, 66.20 classification, 16.07 calibration, Brier 0.098, 18
 catastrophic false approvals. Every figure is out-of-fold; nothing here comes
 from a model scoring its own training data. The interval is a standard error
 over ten fold assignments, and it is quoted because it matters: two retrains of
@@ -66,7 +66,7 @@ distinguishing "unknown from trusted evidence" from "supplied by injection".
 
 ## What actually moved the score
 
-100.0 → 126.03 across twenty-seven measured runs. The largest gains were diagnosis,
+100.0 → 126.00 across twenty-seven measured runs. The largest gains were diagnosis,
 not cleverness.
 
 **Absence of evidence was being read as evidence of absence** — 43 false
@@ -119,7 +119,7 @@ estimator, and that tie-break does real work: three blend weights sit inside one
 standard error, so without it the choice would be a coin flip.
 
 On the same cache the paths alone score **125.17** against the blend's
-**126.03**, so the learner is worth **+0.86**, almost all classification. It
+**126.00**, so the learner is worth **+0.83**, almost all classification. It
 sharpens what it can separate and cannot rescue cases where the evidence is
 absent. That margin has narrowed run over run as extraction improved, which is
 the direction I want — fixes landing in inspectable policy, not in the learner.
@@ -171,7 +171,7 @@ private extraction score should read *higher* than 43.73.
 Measured, not projected: 5,000 packets in **2 h 18 m** — **1.66 s/PDF** against a
 6 s budget — under the real flags (`--network none --cpus 4 --memory 8g
 --read-only --tmpfs /tmp`). 5,000 valid records, 0 missing, validator exits 0.
-Image 1.19 GB (limit 4 GiB), artifact 1.5 MB (limit 250 MiB). No network, no LLM
+Image 1.19 GB (limit 4 GiB), model artifact 112 KB (limit 250 MiB). No network, no LLM
 or cloud OCR — Tesseract, PyMuPDF, scikit-learn.
 
 One bug worth naming because it was *silent*: the adjudicator is a pickle, and
