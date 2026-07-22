@@ -1,0 +1,5 @@
+# Pinned for reproducibility. Everything here is offline at runtime.
+PyMuPDF==1.28.0
+pytesseract==0.3.13
+Pillow==12.3.0
+numpy==2.3.4

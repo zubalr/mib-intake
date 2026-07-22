@@ -69,6 +69,11 @@
       "APPROVED": 0.020281,
       "DENIED": 0.96007,
       "NEEDS_REVIEW": 0.019649
+    },
+    "unreadable_packet": {
+      "APPROVED": 0.12,
+      "DENIED": 0.28,
+      "NEEDS_REVIEW": 0.6
     }
   }
 }

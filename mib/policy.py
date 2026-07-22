@@ -223,3 +223,12 @@ class Calibration:
         path = decision_path(record)
         adjudication, confidence = decide(self.probs(path))
         return adjudication, confidence, path
+
+
+# Packets we could not read at all get their own calibration path rather than
+# falling through the normal rules. An all-unknown Record would otherwise land
+# on `fee_unknown`, whose ~94% NEEDS_REVIEW rate was measured on packets that
+# were successfully read -- wildly overconfident for a packet we know nothing
+# about. Until the corpus tells us the true outcome mix for unreadable packets,
+# this path is absent from the fitted table and resolves to the global prior.
+UNREADABLE_PATH = "unreadable_packet"

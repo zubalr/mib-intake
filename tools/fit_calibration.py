@@ -26,7 +26,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from mib.policy import OUTCOMES, Record, decision_path, decide
+from mib.policy import OUTCOMES, UNREADABLE_PATH, Record, decision_path, decide
 
 # Pseudocounts pulling each path toward the global prior. Chosen so a path with
 # ~10 observations still moves most of the way to its own empirical rate, while
@@ -85,6 +85,17 @@ def main() -> None:
             o: round((c[o] + PRIOR_STRENGTH * prior[o]) / (n + PRIOR_STRENGTH), 6)
             for o in OUTCOMES
         }
+
+    # A packet we could not read at all is not drawn from the same distribution
+    # as the corpus, so the global prior is the wrong reference class -- and on
+    # the global prior the EV of DENIED beats NEEDS_REVIEW by 0.05 raw points,
+    # which is noise, not signal. FIELD_MANUAL.md is explicit that an illegible
+    # packet is a NEEDS_REVIEW, and an unreadable packet is illegible by
+    # definition. This prior encodes that policy rather than a label statistic.
+    #
+    # TODO: replace with a measured distribution once we can identify which
+    # training packets our own extractor fails to read.
+    paths[UNREADABLE_PATH] = {"APPROVED": 0.12, "DENIED": 0.28, "NEEDS_REVIEW": 0.60}
 
     payload = {
         "_source": "fitted on public data/train_labels.csv via tools/fit_calibration.py",
