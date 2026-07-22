@@ -130,6 +130,10 @@ def main() -> None:
     ap.add_argument("--labels", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--repeats", type=int, default=5,
+                    help="Independent fold assignments. Selection uses the mean "
+                         "across repeats plus its standard error, so it stops "
+                         "chasing the noise of one particular split.")
     ap.add_argument("--oof-out", type=Path, default=None,
                     help="Write an honest predictions.jsonl built from "
                          "out-of-fold probabilities, for official scoring.")
@@ -169,23 +173,60 @@ def main() -> None:
 
     baseline = path_baseline(records, list(y), Calibration())
     print(f"\n{'model':14s} {'class/80':>9s} {'calib/20':>9s} {'sum/100':>8s} "
-          f"{'acc':>6s} {'CFA':>4s}")
+          f"{'acc':>6s} {'CFA':>4s}   {'se':>5s}")
     print(f"{'paths (base)':14s} {baseline['classification']:9.2f} "
           f"{baseline['calibration']:9.2f} "
           f"{baseline['classification'] + baseline['calibration']:8.2f} "
           f"{baseline['accuracy']:6.3f} {baseline['cfa']:4d}")
 
-    cv = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=0)
-    results = {}
+    # -- Repeated cross-validation ----------------------------------------
+    #
+    # A single 5-fold split is not enough to *choose* between candidates, only
+    # to estimate one. Run 14 made that concrete: the winning blend weight
+    # flipped 0.50 -> 0.65 between two runs whose extraction differed by a third
+    # of a point, and the top five weights sat within 0.7 points of each other.
+    # Taking the argmax over near-tied candidates fits the selection to the
+    # particular fold assignment, which is a real way to overfit even when every
+    # individual estimate is honest.
+    #
+    # So each candidate is evaluated on `--repeats` independent fold
+    # assignments, and selection uses the mean with its standard error.
+    classes = list(np.unique(y))
+    path_probs = np.array([[Calibration().probs(decision_path(r))[o] for o in OUTCOMES]
+                           for r in records])
+    order = [classes.index(o) for o in OUTCOMES]
+
+    def summarise(scores: list[dict]) -> dict:
+        sums = np.array([s["classification"] + s["calibration"] for s in scores])
+        return {
+            "mean": float(sums.mean()),
+            # Standard error of the mean across repeats. With one repeat there
+            # is no spread to measure, so selection falls back to the argmax.
+            "se": float(sums.std(ddof=1) / np.sqrt(len(sums))) if len(sums) > 1 else 0.0,
+            "classification": float(np.mean([s["classification"] for s in scores])),
+            "calibration": float(np.mean([s["calibration"] for s in scores])),
+            "accuracy": float(np.mean([s["accuracy"] for s in scores])),
+            "cfa": float(np.mean([s["cfa"] for s in scores])),
+        }
+
+    # oof_by_repeat[name][i] is the model's OOF probability matrix on repeat i.
+    oof_by_repeat: dict[str, list[np.ndarray]] = {}
+    results: dict[str, dict] = {}
     for name, factory in CANDIDATES.items():
-        model = factory()
-        oof = cross_val_predict(model, X, y, cv=cv, method="predict_proba", n_jobs=1)
-        classes = list(np.unique(y))
-        score = challenge_score(list(y), oof, classes)
-        results[name] = score
-        print(f"{name:14s} {score['classification']:9.2f} {score['calibration']:9.2f} "
-              f"{score['classification'] + score['calibration']:8.2f} "
-              f"{score['accuracy']:6.3f} {score['cfa']:4d}")
+        mats, scores = [], []
+        for repeat in range(args.repeats):
+            cv = StratifiedKFold(n_splits=args.folds, shuffle=True,
+                                 random_state=repeat)
+            oof = cross_val_predict(factory(), X, y, cv=cv,
+                                    method="predict_proba", n_jobs=1)
+            mats.append(oof)
+            scores.append(challenge_score(list(y), oof, classes))
+        oof_by_repeat[name] = mats
+        results[name] = summarise(scores)
+        r = results[name]
+        print(f"{name:14s} {r['classification']:9.2f} {r['calibration']:9.2f} "
+              f"{r['mean']:8.2f} {r['accuracy']:6.3f} {r['cfa']:4.0f} "
+              f"  +/- {r['se']:.2f}")
 
     # -- Blend the best model with the hand-built path probabilities -------
     #
@@ -196,38 +237,60 @@ def main() -> None:
     # attacks the failure mode seen here -- rf_isotonic bought +0.94 points but
     # took catastrophic false approvals from 18 to 33, because it is confident
     # in the APPROVED direction exactly where the paths are cautious.
-    top = max(results, key=lambda k: results[k]["classification"] + results[k]["calibration"])
-    path_probs = np.array([[Calibration().probs(decision_path(r))[o] for o in OUTCOMES]
-                           for r in records])
-    top_oof = cross_val_predict(CANDIDATES[top](), X, y, cv=cv,
-                                method="predict_proba", n_jobs=1)
-    top_classes = list(np.unique(y))
-    # Re-order model columns to OUTCOMES so the two matrices are comparable.
-    order = [top_classes.index(o) for o in OUTCOMES]
-    top_aligned = top_oof[:, order]
+    top = max(results, key=lambda k: results[k]["mean"])
 
     print()
     for weight in (0.2, 0.35, 0.5, 0.65, 0.8):
-        blended = weight * top_aligned + (1.0 - weight) * path_probs
-        score = challenge_score(list(y), blended, list(OUTCOMES))
+        scores = [challenge_score(list(y), weight * mat[:, order]
+                                  + (1.0 - weight) * path_probs, list(OUTCOMES))
+                  for mat in oof_by_repeat[top]]
         name = f"blend{weight:.2f}"
-        results[name] = score
+        results[name] = summarise(scores)
         results[name]["_blend"] = (top, weight)
-        print(f"{name:14s} {score['classification']:9.2f} {score['calibration']:9.2f} "
-              f"{score['classification'] + score['calibration']:8.2f} "
-              f"{score['accuracy']:6.3f} {score['cfa']:4d}")
+        r = results[name]
+        print(f"{name:14s} {r['classification']:9.2f} {r['calibration']:9.2f} "
+              f"{r['mean']:8.2f} {r['accuracy']:6.3f} {r['cfa']:4.0f} "
+              f"  +/- {r['se']:.2f}")
 
-    best_name = max(results, key=lambda k: results[k]["classification"] + results[k]["calibration"])
-    best = results[best_name]
     base_sum = baseline["classification"] + baseline["calibration"]
-    best_sum = best["classification"] + best["calibration"]
 
-    print(f"\nbest: {best_name}  ({best_sum:.2f} vs paths {base_sum:.2f}, "
-          f"{best_sum - base_sum:+.2f} on the trainable subset)")
+    # -- Selection: one-standard-error rule --------------------------------
+    #
+    # Take the best mean, then accept any candidate within one standard error of
+    # it and pick the most *conservative* of those. Conservative here means
+    # closest to the hand-built paths -- lowest blend weight, and a blend ahead
+    # of a bare model. That tiebreak is not arbitrary: the paths are grounded in
+    # FIELD_MANUAL.md and are a low-variance estimator, so where the evidence
+    # cannot distinguish two candidates, the one leaning on documented policy is
+    # the one more likely to survive a private set drawn from a different
+    # generator run. Train score is not the objective; generalization is.
+    peak = max(results, key=lambda k: results[k]["mean"])
+    threshold = results[peak]["mean"] - results[peak]["se"]
+    within = [k for k in results if results[k]["mean"] >= threshold]
 
-    if best_sum <= base_sum:
+    def conservatism(name: str) -> tuple:
+        info = results[name].get("_blend")
+        weight = info[1] if info else 1.0
+        return (weight, -results[name]["mean"])
+
+    best_name = min(within, key=conservatism)
+    best = results[best_name]
+    best_sum = best["mean"]
+
+    if len(within) > 1:
+        print(f"\nwithin 1 SE of {peak} ({results[peak]['mean']:.2f} "
+              f"+/- {results[peak]['se']:.2f}): {', '.join(sorted(within))}")
+    print(f"selected: {best_name}  ({best_sum:.2f} vs paths {base_sum:.2f}, "
+          f"{best_sum - base_sum:+.2f} on the trainable subset, "
+          f"{args.repeats} repeats x {args.folds} folds)")
+
+    if best_sum - results[best_name]["se"] <= base_sum:
+        # The guard is one-sided on purpose: shipping a model that is merely
+        # tied with the paths adds variance and review surface for nothing.
         print("Model does not beat the hand-built paths out-of-fold. NOT saving.")
         return
+
+    cv = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=0)
 
     blend_info = results[best_name].get("_blend")
     base_name, blend_weight = blend_info if blend_info else (best_name, 1.0)
@@ -240,9 +303,12 @@ def main() -> None:
         "oof_classification": round(best["classification"], 3),
         "oof_calibration": round(best["calibration"], 3),
         "oof_accuracy": round(best["accuracy"], 4),
-        "oof_cfa": best["cfa"],
+        "oof_cfa": round(best["cfa"], 2),
+        "oof_sum_mean": round(best["mean"], 3),
+        "oof_sum_se": round(best["se"], 3),
         "n_train": len(trainable),
         "folds": args.folds,
+        "repeats": args.repeats,
         "paths_baseline_sum": round(base_sum, 3),
     })
     adjudicator.save(args.out)
