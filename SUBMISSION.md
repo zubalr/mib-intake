@@ -27,20 +27,20 @@ docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
 
 | | |
 | --- | --- |
-| Out-of-fold score on train | **122.1 / 150** |
-| Extraction / classification / calibration | 42.6 / 64.0 / 15.6 |
-| Mean Brier | 0.109 |
-| Catastrophic false approvals | 25 / 1,000 |
-| Runtime | 1.72 s/PDF in-container (budget 6 s) |
+| Out-of-fold score on train | **123.2 / 150** |
+| Extraction / classification / calibration | 42.6 / 64.9 / 15.8 |
+| Mean Brier | 0.106 |
+| Catastrophic false approvals | 17 / 1,000 |
+| Runtime | 1.77 s/PDF in-container (budget 6 s) |
 | Image size | 1.19 GB (limit 4 GiB) |
-| Model artifact | 118 KB (limit 250 MiB) |
+| Model artifact | 1.5 MB (limit 250 MiB) |
 
 Approach: trust-ranked evidence extraction implementing `FIELD_MANUAL.md`
 precedence, closed-vocabulary snapping with OCR-aware edit distance, structural
 quarantine of hidden and non-evidentiary text, and an expected-value decision
 rule over the evaluator's own payoff matrix. Probabilities come from a blend of
-hand-built decision paths and a small gradient-boosted model trained only on
-evidence features — no `case_id`, filename, or packet-identifying input.
+hand-built decision paths and a small isotonic-calibrated random forest trained
+only on evidence features — no `case_id`, filename, or packet-identifying input.
 
 No LLMs, VLMs, or cloud OCR anywhere in the runtime: Tesseract, PyMuPDF and
 scikit-learn only.

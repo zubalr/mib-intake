@@ -5,8 +5,8 @@ of adversarial PDF case packets and emits `predictions.jsonl`: ten extracted
 fields plus an `APPROVED` / `DENIED` / `NEEDS_REVIEW` adjudication with a
 calibrated confidence.
 
-**Score: 122.1 / 150 out-of-fold** on the 1,000 labelled training packets —
-42.6 extraction, 64.0 classification, 15.6 calibration, Brier 0.109.
+**Score: 123.2 / 150 out-of-fold** on the 1,000 labelled training packets —
+42.6 extraction, 64.9 classification, 15.8 calibration, Brier 0.106.
 
 See [`MEMO.md`](MEMO.md) for the technical write-up and [`WORKLOG.md`](WORKLOG.md)
 for the full run-by-run history, including the regressions.
@@ -41,7 +41,7 @@ scikit-learn only.
 | `mib/model.py` | The learned adjudicator (falls back to hand-built paths if absent) |
 | `mib/cli.py` | Two-phase parallel driver, output-schema enforcement |
 | `tools/` | Training, calibration fitting, extraction cache, diagnostics |
-| `policy/` | Fitted artifacts: lexicon, calibration, adjudicator (118 KB) |
+| `policy/` | Fitted artifacts: lexicon, calibration, adjudicator (1.5 MB) |
 
 ## Development
 

@@ -1,7 +1,7 @@
 # MIB Doc Challenge — Technical Memo
 
-**Score:** 122.1 / 150 out-of-fold on the 1,000 labelled training packets —
-42.6 extraction, 64.0 classification, 15.6 calibration, Brier 0.109, 25
+**Score:** 123.2 / 150 out-of-fold on the 1,000 labelled training packets —
+42.6 extraction, 64.9 classification, 15.8 calibration, Brier 0.106, 17
 catastrophic false approvals. Every number here is out-of-fold; no reported
 figure comes from a model scoring its own training data.
 
@@ -84,14 +84,18 @@ change.
 
 ## 4. What actually moved the score
 
-Progress was 100.0 → 122.1 across fifteen measured runs. The three largest gains
+Progress was 100.0 → 123.2 across seventeen measured runs. The three largest gains
 were all *diagnosis*, not cleverness.
 
 **43 catastrophic false approvals came from reading absence of evidence as
 evidence of absence.** A biometric slip we could not read looks exactly like one
 saying "no risk flags". Separating `risk_flags_known` from `risk_flags == {}`,
 and splitting "risk page absent" from "risk page unreadable", took false
-approvals from 43 to under 20 while *raising* the total.
+approvals from 43 to 17 while *raising* the total. The same conflation
+survived in one corner until late: a biometric slip that exists only as a raster
+is typed `SCANNED`, never `BIOMETRIC`, so a packet whose risk panel OCR'd
+cleanly as "Observed flags: none" was still indistinguishable from one whose risk
+page was never opened.
 
 **The OCR segmentation mode was the whole extraction problem.** I split 1,769
 missed fields into "no value recovered" (1,315) versus "value read and wrong"
@@ -114,27 +118,35 @@ contaminate a 98th percentile. The reference now trims against the median.
 Hand-built decision paths are a 16-bucket histogram: every packet in a bucket
 gets the same probability vector, so ~208 decidable cases were hedged to
 NEEDS_REVIEW because a bucket average sat near the boundary. A small
-gradient-boosted model over 86 **evidence** features separates within buckets.
+isotonic-calibrated random forest over 86 **evidence** features separates within
+those buckets. Isotonic calibration is not decoration: the uncalibrated forest
+beat the paths on accuracy *and* on false approvals yet lost overall purely on
+the Brier term, and calibration is a fifth of the score.
 
 Constraints I imposed on it:
 
 - It never sees a `case_id`, filename, or anything packet-identifying. Every
   feature is a property of the evidence and means the same thing on a packet
   from a different generator run.
-- It never overrules an adjudicator note (256/256 correct) or the injection
+- It never overrules an adjudicator note (307/307 correct) or the injection
   quarantine. Those are policy, not statistics.
 - It does not choose the adjudication — it emits probabilities, and the same EV
   argmax decides.
 - It ships **only if it beats the hand-built paths out-of-fold**, and the paths
   remain a working fallback if the artifact is missing.
 
-The final estimator is a 50/50 blend of model and paths. That blend was not
+The final estimator is a 35/65 blend of model and hand-built paths. That blend was not
 chosen by argmax: candidates sat within 0.7 points of each other on a single
 5-fold split, and the winner flipped between runs. Selection now uses 5
 independent fold assignments and a **one-standard-error rule**, breaking ties
-toward the path-grounded estimator. It cost 0.05 points on train and took false
-approvals from 30 to 25 — the right trade, because train score is not the
-objective.
+toward the path-grounded estimator. Introducing it cost 0.05 points on train and
+took false approvals from 30 to 25 — the right trade, because train score is not
+the objective. It has since selected the more conservative of several tied
+candidates on every run.
+
+The model's margin over the hand-built paths has *narrowed* as extraction
+improved, from +2.2 to +0.4 out-of-fold. That is the direction I want: each
+evidence fix lands in inspectable policy rather than in the learner.
 
 ## 6. Honest limits
 
@@ -147,10 +159,10 @@ extraction score there should read *higher* than the training figure.
 
 ## 7. Runtime and reproducibility
 
-1.72 s/PDF in-container under the real scoring flags (`--network none --cpus 4
+1.77 s/PDF in-container under the real scoring flags (`--network none --cpus 4
 --memory 8g --read-only --tmpfs /tmp`), against a 6 s budget; the 5,000-packet
 validation set runs in about 2.5 hours against an 8h20m cap. Image 1.19 GB
-(limit 4 GiB); model artifact 118 KB (limit 250 MiB). No network, no API keys,
+(limit 4 GiB); model artifact 1.5 MB (limit 250 MiB). No network, no API keys,
 no LLM or cloud OCR — Tesseract, PyMuPDF, and scikit-learn only.
 
 One reproducibility bug is worth naming because it was silent: the adjudicator
@@ -159,5 +171,5 @@ the image pinned 1.7.2. The container still produced 200 well-formed
 predictions; the only symptom was a warning in stderr. `tools/check_env.py` now
 asserts training and runtime pins match, and is the pre-build gate.
 
-`WORKLOG.md` in the solution repository records all fifteen runs with their
+`WORKLOG.md` in the solution repository records all seventeen runs with their
 section breakdowns, including the regressions and the negative results.
