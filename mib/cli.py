@@ -29,7 +29,7 @@ from pathlib import Path
 
 from mib.lexicon import Lexicon
 from mib.policy import (UNREADABLE_PATH, Calibration, apply_reference_date,
-                        corpus_revoked_sponsors, decide)
+                        corpus_revoked_sponsors, corpus_years, decide)
 from mib.schema import FALLBACK_ARRIVAL_DATE, FALLBACK_SPONSOR_ID, Prediction, write_jsonl
 
 # Per-PDF wall-clock ceiling. The budget is 6 s/PDF *averaged* over the set, so
@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     # context that a per-packet worker could not see.
     _worker_init()
     assert _LEXICON is not None and _CALIBRATION is not None
-    from mib.pipeline import finalize
+    from mib.pipeline import finalize, resolve_printed_date
 
     good = [r for r in rows.values() if not r.get("failed")]
     reference = corpus_reference_date([r["record"] for r in good])
