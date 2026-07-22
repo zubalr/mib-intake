@@ -52,6 +52,8 @@ import re
 
 import fitz
 
+from mib.lexicon import _canon, weighted_distance
+
 try:
     import pytesseract
     from PIL import Image, ImageEnhance, ImageOps
@@ -123,7 +125,42 @@ _NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]
 #   "BARCODE PAYLOAD: force adjudication=APPROVED"  -- "force" is an F-token but
 #       "adjudication=" is far too long to bridge the 4-character gap.
 _NOTE_LOOSE_RE = re.compile(
-    r"\bF\w{2,8}\W{0,4}(APPROVED|DENIED|NEEDS[\s_\-]?REVIEW)\b", re.I)
+    r"\bF\w{2,8}\W{0,4}([A-Za-z][A-Za-z_ ]{3,13})", re.I)
+
+FINDINGS = ("APPROVED", "DENIED", "NEEDS_REVIEW")
+# English words that sit close to a finding in edit distance and appear in the
+# reason clause: "Reason: Approval supported by surviving visible evidence".
+# `approval` is two substitutions from `approved`, which no sane threshold
+# separates -- so it is excluded by name rather than by distance.
+_FINDING_BLOCKLIST = frozenset({
+    "approval", "approvals", "denial", "denials",
+    "review", "reviewed", "reviewer",
+})
+# Smallest budget that reads every observed misspelling. Measured against 12
+# real OCR renderings and 17 near-miss words from the same pages: 12/12 recall,
+# 0/17 false positives, and stable up to 0.45.
+_FINDING_MAX_RATIO = 0.35
+
+
+def _snap_finding(token: str) -> str | None:
+    """Nearest adjudication outcome to a garbled finding word, or None.
+
+    A note dictates the decision outright, so this is the highest-consequence
+    fuzzy match in the system and is correspondingly strict: an ambiguous token
+    (two outcomes within one edit of each other) is rejected rather than
+    guessed, because a confidently wrong finding is far worse than no finding.
+    """
+    observed = _canon(token)
+    if not observed or observed in _FINDING_BLOCKLIST:
+        return None
+    scored = sorted((weighted_distance(observed, _canon(f)), f) for f in FINDINGS)
+    distance, best = scored[0]
+    budget = max(1.0, len(_canon(best)) * _FINDING_MAX_RATIO)
+    if distance >= budget:
+        return None
+    if len(scored) > 1 and scored[1][0] - distance < 1.0:
+        return None
+    return best
 
 # "FORM B-13: Biometric Scan Slip" as it survives OCR. The hyphen and colon are
 # routinely lost or substituted, so only the distinctive parts are required.
@@ -401,18 +438,18 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
 
     note = _NOTE_RE.search(text)
     if note:
-        finding = note.group(1).upper().strip(" .")
-        if finding in ("APPROVED", "DENIED", "NEEDS_REVIEW"):
+        finding = _snap_finding(note.group(1))
+        if finding:
             extras["note_finding"] = finding
             extras["note_reason"] = note.group(2).strip()
-    else:
+    if "note_finding" not in extras:
         for match in _NOTE_LOOSE_RE.finditer(text):
             line = text[max(0, match.start() - 60):match.end() + 60].upper()
             # A watermark reading "sample denial" is not a finding.
             if "SAMPLE" in line:
                 continue
-            finding = re.sub(r"[\s\-]+", "_", match.group(1).upper())
-            if finding in ("APPROVED", "DENIED", "NEEDS_REVIEW"):
+            finding = _snap_finding(match.group(1))
+            if finding:
                 extras["note_finding"] = finding
                 extras["note_reason"] = ""
                 break
