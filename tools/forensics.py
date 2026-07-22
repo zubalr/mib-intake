@@ -30,6 +30,8 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
+from mib.pdfio import extract_spans
+
 # PDF text render mode 3 = "neither fill nor stroke", i.e. invisible. This is the
 # classic OCR-text-layer mode and also the classic hiding place for injections.
 RENDER_MODE_INVISIBLE = 3
