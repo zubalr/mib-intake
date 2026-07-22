@@ -11,12 +11,20 @@ The whole architecture hinges on questions this answers:
   * Where does the packet *receipt* date live? (needed for the staleness rule --
     the labels expose arrival_date but never receipt date)
   * How do multi-applicant packets mark the active case_id?
+  * Does a packet carry a registry extract stating sponsor revocation status? If
+    so we can read revocation from the document instead of relying on the
+    six-ID list inferred from label frequencies.
+
+Span visibility classification is delegated to `mib.pdfio`, which is unit-tested
+against synthetic PDFs carrying each hiding technique. Duplicating that logic
+here is how the first draft ended up with two silent bugs.
 
 Dev-time only; nothing here ships in the image.
 
 Usage:
-    python tools/forensics.py --pdf-dir ../mib-doc-challenge/data/train \
-        --sample 120 --out scratch/forensics.json
+    PYTHONPATH=. python tools/forensics.py \
+        --pdf-dir ../mib-doc-challenge/data/train \
+        --sample 150 --out scratch/forensics.json
 """
 
 from __future__ import annotations
@@ -32,124 +40,75 @@ import fitz  # PyMuPDF
 
 from mib.pdfio import extract_spans
 
-# PDF text render mode 3 = "neither fill nor stroke", i.e. invisible. This is the
-# classic OCR-text-layer mode and also the classic hiding place for injections.
-RENDER_MODE_INVISIBLE = 3
-
 FIELD_CUES = [
     "case", "applicant", "species", "home world", "homeworld", "visa",
     "sponsor", "arrival", "purpose", "risk", "fee", "receipt", "received",
     "stamp", "waiver", "diplomatic", "biometric", "registry", "adjudicat",
+    "revoked", "revocation", "status", "hardship", "embargo",
 ]
 
 INJECTION_CUES = [
     "ignore", "system", "instruction", "approve all", "answer key", "you must",
-    "disregard", "override", "assistant", "prompt",
+    "disregard", "override", "assistant", "prompt", "must be approved",
 ]
 
-
-def luminance(srgb: int) -> float:
-    r = (srgb >> 16) & 0xFF
-    g = (srgb >> 8) & 0xFF
-    b = srgb & 0xFF
-    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+SPONSOR_RE = re.compile(r"\bSPN-\d{4}\b")
+CASE_RE = re.compile(r"\bMIB-\d{6}\b")
 
 
 def analyse(path: Path) -> dict:
     doc = fitz.open(path)
+    spans = extract_spans(doc)
+
     rec: dict = {
         "case_id": path.stem,
         "pages": len(doc),
-        "visible_chars": 0,
-        "invisible_chars": 0,
-        "white_chars": 0,
-        "offcrop_chars": 0,
+        "visible_chars": sum(len(s.text) for s in spans if not s.hidden),
+        "invisible_chars": sum(len(s.text) for s in spans if s.invisible),
+        "white_chars": sum(len(s.text) for s in spans if s.white),
+        "offcrop_chars": sum(len(s.text) for s in spans if s.offcrop),
+        "rotated_spans": sum(1 for s in spans if s.rotated),
         "images": 0,
         "image_pixels": 0,
         "vector_drawings": 0,
         "annotations": 0,
-        "fonts": set(),
-        "rotations": set(),
-        "field_cues": set(),
-        "injection_cues": set(),
-        "hidden_samples": [],
-        "page_text_chars": [],
+        "fonts": sorted({s.font for s in spans}),
+        "rotations": sorted({p.rotation for p in doc}),
+        "hidden_samples": [
+            {"text": s.text[:200], "reasons": list(s.hide_reasons), "page": s.page}
+            for s in spans if s.hidden
+        ][:8],
     }
 
     for page in doc:
-        rec["rotations"].add(page.rotation)
         rec["annotations"] += len(list(page.annots() or []))
         rec["vector_drawings"] += len(page.get_drawings())
-
         for img in page.get_images(full=True):
             rec["images"] += 1
             rec["image_pixels"] += int(img[2]) * int(img[3])
-
-        # The visible area. Text drawn outside it is not visible evidence.
-        crop = page.rect
-        page_chars = 0
-
-        data = page.get_text("dict")
-        for block in data.get("blocks", []):
-            if block.get("type") != 0:  # 0 = text
-                continue
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    text = span.get("text", "")
-                    if not text.strip():
-                        continue
-                    n = len(text)
-                    page_chars += n
-                    rec["fonts"].add(span.get("font", "?"))
-
-                    bbox = fitz.Rect(span["bbox"])
-                    mode = span.get("char_flags", 0)
-                    # PyMuPDF exposes render mode via span["alpha"]/flags
-                    # inconsistently across versions; check what we can.
-                    invisible = span.get("alpha", 1) == 0
-                    lum = luminance(span.get("color", 0))
-                    white = lum > 0.94
-                    offcrop = not bbox.intersects(crop)
-
-                    hidden = invisible or white or offcrop
-                    if invisible:
-                        rec["invisible_chars"] += n
-                    if white:
-                        rec["white_chars"] += n
-                    if offcrop:
-                        rec["offcrop_chars"] += n
-                    if not hidden:
-                        rec["visible_chars"] += n
-
-                    low = text.casefold()
-                    for cue in FIELD_CUES:
-                        if cue in low:
-                            rec["field_cues"].add(cue)
-                    for cue in INJECTION_CUES:
-                        if cue in low:
-                            rec["injection_cues"].add(cue)
-
-                    if hidden and len(rec["hidden_samples"]) < 6:
-                        rec["hidden_samples"].append({
-                            "text": text[:160],
-                            "invisible": invisible,
-                            "white": white,
-                            "offcrop": offcrop,
-                            "color": span.get("color", 0),
-                        })
-
-        rec["page_text_chars"].append(page_chars)
-
     doc.close()
-    for key in ("fonts", "rotations", "field_cues", "injection_cues"):
-        rec[key] = sorted(rec[key], key=str)
+
+    vis = "\n".join(s.text for s in spans if not s.hidden)
+    hid = "\n".join(s.text for s in spans if s.hidden)
+    low_vis = vis.casefold()
+
+    rec["field_cues"] = sorted({c for c in FIELD_CUES if c in low_vis})
+    rec["injection_cues_hidden"] = sorted({c for c in INJECTION_CUES if c in hid.casefold()})
+    rec["injection_cues_visible"] = sorted({c for c in INJECTION_CUES if c in low_vis})
+
+    rec["visible_dates"] = sorted(set(DATE_RE.findall(vis)))[:10]
+    rec["hidden_dates"] = sorted(set(DATE_RE.findall(hid)))[:10]
+    rec["visible_sponsors"] = sorted(set(SPONSOR_RE.findall(vis)))[:10]
+    rec["visible_case_ids"] = sorted(set(CASE_RE.findall(vis)))[:10]
+    rec["visible_sample"] = vis[:1200]
     return rec
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pdf-dir", required=True, type=Path)
-    parser.add_argument("--sample", type=int, default=100)
+    parser.add_argument("--sample", type=int, default=150)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -164,44 +123,64 @@ def main() -> None:
     for i, pdf in enumerate(pdfs, 1):
         try:
             records.append(analyse(pdf))
-        except Exception as exc:  # noqa: BLE001 - forensics must not abort
+        except Exception as exc:  # noqa: BLE001 - forensics must never abort
             records.append({"case_id": pdf.stem, "error": repr(exc)})
-        if i % 25 == 0:
+        if i % 50 == 0:
             print(f"  ...{i}/{len(pdfs)}", flush=True)
 
     ok = [r for r in records if "error" not in r]
-    print(f"\n=== {len(ok)}/{len(records)} parsed ===")
-    print(f"pages:            {Counter(r['pages'] for r in ok).most_common()}")
-    print(f"rotations seen:   {Counter(x for r in ok for x in r['rotations']).most_common()}")
+    err = [r for r in records if "error" in r]
+    print(f"\n=== parsed {len(ok)}/{len(records)} ===")
+    if err:
+        print(f"errors: {err[:3]}")
 
-    no_text = [r for r in ok if r["visible_chars"] < 50]
-    print(f"visible text <50 chars (OCR needed): {len(no_text)}/{len(ok)}")
+    print(f"pages per packet: {Counter(r['pages'] for r in ok).most_common()}")
+    print(f"page rotations:   {Counter(x for r in ok for x in r['rotations']).most_common()}")
+
     vis = sorted(r["visible_chars"] for r in ok)
-    print(f"visible chars   min/median/max: {vis[0]} / {vis[len(vis)//2]} / {vis[-1]}")
+    print(f"\nvisible chars  min/p10/median/max: {vis[0]} / {vis[len(vis)//10]} / "
+          f"{vis[len(vis)//2]} / {vis[-1]}")
+    print(f"packets with <50 visible chars (need OCR): "
+          f"{sum(1 for r in ok if r['visible_chars'] < 50)}/{len(ok)}")
 
     for kind in ("invisible_chars", "white_chars", "offcrop_chars"):
         n = sum(1 for r in ok if r[kind] > 0)
         print(f"{kind:18s} present in {n}/{len(ok)} packets")
+    print(f"{'rotated_spans':18s} present in "
+          f"{sum(1 for r in ok if r['rotated_spans'] > 0)}/{len(ok)} packets")
 
     imgs = sorted(r["images"] for r in ok)
-    print(f"images per packet min/median/max: {imgs[0]} / {imgs[len(imgs)//2]} / {imgs[-1]}")
-    print(f"annotations present: {sum(1 for r in ok if r['annotations'] > 0)}/{len(ok)}")
+    print(f"\nimages/packet min/median/max: {imgs[0]} / {imgs[len(imgs)//2]} / {imgs[-1]}")
+    print(f"packets with annotations: {sum(1 for r in ok if r['annotations'] > 0)}/{len(ok)}")
+    print(f"packets with vector art:  {sum(1 for r in ok if r['vector_drawings'] > 0)}/{len(ok)}")
 
-    print(f"\nfield cues seen: {Counter(c for r in ok for c in r['field_cues']).most_common()}")
-    print(f"injection cues:  {Counter(c for r in ok for c in r['injection_cues']).most_common()}")
-    print(f"fonts:           {Counter(f for r in ok for f in r['fonts']).most_common(12)}")
+    print(f"\nfield cues (visible):     {Counter(c for r in ok for c in r['field_cues']).most_common()}")
+    print(f"injection cues (hidden):  {Counter(c for r in ok for c in r['injection_cues_hidden']).most_common()}")
+    print(f"injection cues (visible): {Counter(c for r in ok for c in r['injection_cues_visible']).most_common()}")
+
+    n_multi_case = sum(1 for r in ok if len(r["visible_case_ids"]) > 1)
+    print(f"\npackets naming >1 case id visibly: {n_multi_case}/{len(ok)}")
+    n_multi_spn = sum(1 for r in ok if len(r["visible_sponsors"]) > 1)
+    print(f"packets naming >1 sponsor visibly: {n_multi_spn}/{len(ok)}")
+    ndates = Counter(len(r["visible_dates"]) for r in ok)
+    print(f"visible date count per packet: {sorted(ndates.items())}")
+    print(f"packets with a hidden-only date: "
+          f"{sum(1 for r in ok if r['hidden_dates'] and not r['visible_dates'])}/{len(ok)}")
 
     print("\n--- sample hidden text ---")
     shown = 0
     for r in ok:
         for s in r["hidden_samples"]:
-            print(f"  [{r['case_id']}] inv={s['invisible']} white={s['white']} "
-                  f"off={s['offcrop']} :: {s['text']!r}")
+            print(f"  [{r['case_id']} p{s['page']}] {'+'.join(s['reasons'])} :: {s['text'][:110]!r}")
             shown += 1
-            if shown >= 15:
+            if shown >= 20:
                 break
-        if shown >= 15:
+        if shown >= 20:
             break
+
+    print("\n--- one packet's visible text ---")
+    if ok:
+        print(ok[0]["visible_sample"][:1500])
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
