@@ -188,3 +188,42 @@ class TestArrivalYearRepair:
         printed = {"arrival_date": "2000-01-01"}
         pipeline.resolve_printed_date(printed, record, "2026-06-01", {})
         assert printed["arrival_date"] == "2026-06-01"
+
+
+class TestReasonScoping:
+    """A rationale that is a whole sentence identifies its own page."""
+
+    def test_intact_rationale_survives_destroyed_scope_cues(self):
+        # MIB-000333, verbatim: the rationale is clean while `Adjudicator`,
+        # `Manual` and `Reason` are each damaged past recognition.
+        text = ("Manu... . _judicator Note Feria g2280NFn_ | Reascr, "
+                "Clean or exception-qualifled packet.")
+        assert parse_fields(text)[2].get("note_finding") == "APPROVED"
+
+    def test_debris_inside_the_phrase(self):
+        # MIB-000357: OCR wedged a pipe and a space into "exception".
+        text = "| Manual Adjudicator Note nding: APPRO' eason: Clean or exce| tion-qualified packet."
+        assert parse_fields(text)[2].get("note_finding") == "APPROVED"
+
+    def test_rationale_with_no_note_furniture_at_all(self):
+        # MIB-000748: no title, no `Reason:` label, just the rationale.
+        text = "DENED Denial supported by damaged MD elton ot yy salle policy notes,"
+        assert parse_fields(text)[2].get("note_finding") == "DENIED"
+
+    def test_scoped_rationales_still_need_a_note_page(self):
+        # "Disqualifying risk flag" is how the *biometric panel* labels a flag,
+        # so on its own it must not be read as an adjudicator finding.
+        panel = "FORM B-13 Biometric Scan Slip Observed flags: disqualifying biohazard_red"
+        assert parse_fields(panel)[2].get("note_finding") is None
+        # ...but it decides the case on a page that is a note.
+        note = "Manual Adjudicator Note Reason: Disqualifying risk flag: biohazard_red."
+        assert parse_fields(note)[2].get("note_finding") == "DENIED"
+
+    def test_watermark_still_blocks_the_reason_path(self):
+        text = "SAMPLE DENIAL Denial supported by surviving visible evidence"
+        assert parse_fields(text)[2].get("note_finding") is None
+
+    def test_two_rationales_are_rejected(self):
+        text = ("Manual Adjudicator Note Reason: Clean or exception-qualified "
+                "packet. Denial supported by damaged policy notes.")
+        assert parse_fields(text)[2].get("note_finding") is None

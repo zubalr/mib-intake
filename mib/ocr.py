@@ -160,28 +160,51 @@ _FINDING_MAX_RATIO = 0.35
 # different sentence of it. Anchored on the distinctive words rather than the
 # whole phrase, since OCR eats the rest, and only consulted when no finding word
 # could be read at all.
-_REASON_FINDINGS = (
-    (re.compile(r"(?i)d[il]squal[il]f"), "DENIED"),
-    (re.compile(r"(?i)trans[il]t\s+class"), "DENIED"),
-    (re.compile(r"(?i)den[il]a[li]\s+supp"), "DENIED"),
-    (re.compile(r"(?i)revoked\s+spon"), "DENIED"),
-    (re.compile(r"(?i)clean\s+or\s+except"), "APPROVED"),
-    (re.compile(r"(?i)approva[li]\s+supp"), "APPROVED"),
-    (re.compile(r"(?i)rev[il]ew[\s\-]?only"), "NEEDS_REVIEW"),
-    (re.compile(r"(?i)arr[il]va[li]\s+date\s+m[il]ss"), "NEEDS_REVIEW"),
-    (re.compile(r"(?i)damaged\s+or\s+contra"), "NEEDS_REVIEW"),
+# Split by whether the phrase needs the page identified as a note first, and
+# `\W*` rather than `\s+` between words throughout -- OCR wedges pipes and stray
+# marks *inside* a phrase, and "Clean or exce| tion-qualified" broke a pattern
+# that only tolerated whitespace.
+#
+# A rationale that is a **complete sentence opening from the manual** identifies
+# the page by itself: these phrases occur nowhere in this corpus except an
+# adjudicator note, so demanding a separate note-page cue only discards them.
+# That is not hypothetical. MIB-000333 reads
+#
+#     "Manu... . _judicator Note ... Reascr, Clean or exception-qualifled packet."
+#
+# where the rationale survives *intact* while every scope cue is destroyed at
+# once: `Adjudicator` lost its "Ad", `Manual` its "l", `Reason` became "Reascr".
+# The guard was rejecting notes on the strength of damage to the words *around*
+# the evidence.
+_REASON_FINDINGS_SELF_SCOPING = (
+    (re.compile(r"(?i)den[il1]a[li1]\W*supp"), "DENIED"),
+    (re.compile(r"(?i)c[li1]ean\W*or\W*exce"), "APPROVED"),
+    (re.compile(r"(?i)approva[li1]\W*supp"), "APPROVED"),
+    (re.compile(r"(?i)arr[il1]va[li1]\W*date\W*m[il1]ss"), "NEEDS_REVIEW"),
+    (re.compile(r"(?i)damaged\W*or\W*contra"), "NEEDS_REVIEW"),
 )
-# Only trust the reason clause on a page that is actually an adjudicator note.
-# These phrases are distinctive, but scoping them to the note page keeps the
-# rule from firing on prose that happens to mention a disqualifying flag.
-_NOTE_PAGE_CUE = re.compile(r"(?i)adjud|manua[li]\s*n|reason\s*[:;.]")
+# These stay scoped, because each plausibly appears elsewhere in a packet:
+# "disqualifying" and "review-only" label risk flags on a biometric panel,
+# "revoked sponsor" is registry-extract wording, and "transit class" echoes the
+# TRANSIT-7 visa class on an intake form.
+_REASON_FINDINGS_SCOPED = (
+    (re.compile(r"(?i)d[il1]squa[li1][il1]f"), "DENIED"),
+    (re.compile(r"(?i)trans[il1]t\W*c[li1]ass"), "DENIED"),
+    (re.compile(r"(?i)revoked\W*spon"), "DENIED"),
+    (re.compile(r"(?i)rev[il1]ew\W*on[li1]y"), "NEEDS_REVIEW"),
+)
+# Identifies a page as an adjudicator note. `r?eason` because the leading letter
+# of a label is routinely clipped at the left edge of a scan ("eason:").
+_NOTE_PAGE_CUE = re.compile(r"(?i)adjud|manua[li1]\s*n|r?eason\s*[:;.]")
 
 
 def _finding_from_reason(text: str) -> str | None:
     """Infer the finding from the note's reason clause, or None."""
-    if not _NOTE_PAGE_CUE.search(text):
-        return None
-    hits = {finding for pattern, finding in _REASON_FINDINGS if pattern.search(text)}
+    hits = {finding for pattern, finding in _REASON_FINDINGS_SELF_SCOPING
+            if pattern.search(text)}
+    if _NOTE_PAGE_CUE.search(text):
+        hits |= {finding for pattern, finding in _REASON_FINDINGS_SCOPED
+                 if pattern.search(text)}
     # A reason naming two different rationales is not a reason we understand.
     return hits.pop() if len(hits) == 1 else None
 
