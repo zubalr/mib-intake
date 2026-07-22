@@ -30,7 +30,7 @@ from pathlib import Path
 from mib.lexicon import Lexicon
 from mib.policy import (UNREADABLE_PATH, Calibration, apply_reference_date,
                         corpus_revoked_sponsors, decide)
-from mib.schema import Prediction, write_jsonl
+from mib.schema import FALLBACK_ARRIVAL_DATE, FALLBACK_SPONSOR_ID, Prediction, write_jsonl
 
 # Per-PDF wall-clock ceiling. The budget is 6 s/PDF *averaged* over the set, so
 # a single pathological packet may overrun -- but it must not stall the run.
@@ -75,8 +75,8 @@ def fallback_prediction(case_id: str, lexicon: Lexicon, calibration: Calibration
         species_code=lexicon.prior_mode("species_code"),
         home_world=lexicon.prior_mode("home_world"),
         visa_class=lexicon.prior_mode("visa_class"),
-        sponsor_id="SPN-1000",
-        arrival_date="2026-04-01",
+        sponsor_id=FALLBACK_SPONSOR_ID,
+        arrival_date=FALLBACK_ARRIVAL_DATE,
         declared_purpose=lexicon.prior_mode("declared_purpose"),
         risk_flags="none",
         # Prior mode like every other field here. The *adjudication* stays
@@ -117,7 +117,7 @@ def process_one(pdf_path_str: str) -> dict:
         signal.signal(signal.SIGALRM, previous)
 
 
-def corpus_reference_date(records) -> str:
+def corpus_reference_date(records) -> str | None:
     """Approximate packet receipt date for the staleness rule.
 
     Packets carry only an arrival date -- there is no receipt date to read (the
@@ -138,7 +138,13 @@ def corpus_reference_date(records) -> str:
         except (ValueError, TypeError):
             continue
     if not dates:
-        return "2026-07-15"
+        # No readable date anywhere in the corpus. Any constant here would be
+        # fitted to the era of whatever set it was chosen on, so return None and
+        # let staleness be *undeterminable* -- `_is_stale` already reports that
+        # honestly, and `decision_path` has a `staleness_indeterminate` branch
+        # for it. Guessing a date would silently manufacture staleness verdicts
+        # out of nothing.
+        return None
     dates.sort()
 
     # Trim outliers *before* taking the percentile.
@@ -163,6 +169,31 @@ def corpus_reference_date(records) -> str:
 
     index = min(len(kept) - 1, int(len(kept) * 0.98))
     return kept[index].isoformat()
+
+
+def corpus_median_date(records) -> str | None:
+    """Median arrival date of the corpus being scored.
+
+    Used to fill `arrival_date` on packets where no trusted evidence supplied
+    one. The evaluator scores a wrong value exactly like a blank and drops
+    genuinely unrecoverable fields from the denominator, so this guess is free
+    upside -- but only if it is drawn from the corpus in hand rather than from
+    the era of the public training set.
+    """
+    import datetime as dt
+    dates = []
+    for rec in records:
+        value = getattr(rec, "arrival_date", None)
+        if not value or value == "unknown":
+            continue
+        try:
+            dates.append(dt.date.fromisoformat(value))
+        except (ValueError, TypeError):
+            continue
+    if not dates:
+        return None
+    dates.sort()
+    return dates[len(dates) // 2].isoformat()
 
 
 def available_cpus() -> int:
@@ -208,10 +239,10 @@ def _enforce_output_schema(rows: list[dict]) -> None:
     repaired = 0
     for row in rows:
         if not valid_sponsor(str(row.get("sponsor_id", ""))):
-            row["sponsor_id"] = "SPN-1000"
+            row["sponsor_id"] = FALLBACK_SPONSOR_ID
             repaired += 1
         if not valid_date(str(row.get("arrival_date", ""))):
-            row["arrival_date"] = "2026-04-01"
+            row["arrival_date"] = FALLBACK_ARRIVAL_DATE
             repaired += 1
         if str(row.get("fee_status", "")) not in FEE_VALUES:
             row["fee_status"] = "unknown"
@@ -275,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     good = [r for r in rows.values() if not r.get("failed")]
     reference = corpus_reference_date([r["record"] for r in good])
     revoked = corpus_revoked_sponsors([r["record"] for r in good])
+    median_date = corpus_median_date([r["record"] for r in good])
     print(f"[info] staleness reference date: {reference}", file=sys.stderr)
     print(f"[info] corpus-derived revoked sponsors: {sorted(revoked)}", file=sys.stderr)
     print(f"[info] adjudicator: "
@@ -288,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
                 case_id, _LEXICON, _CALIBRATION, row.get("reason", "?")).to_row()
             continue
         record = apply_reference_date(row["record"], reference, revoked)
+        if record.arrival_date == "unknown" and median_date:
+            row["printed"]["arrival_date"] = median_date
         final[case_id] = finalize(
             row["printed"], record, row["note"], _CALIBRATION,
             adjudicator=_ADJUDICATOR, features=row.get("features")).to_row()

@@ -21,7 +21,8 @@ import argparse
 import json
 from pathlib import Path
 
-from mib.cli import _enforce_output_schema, corpus_reference_date, fallback_prediction
+from mib.cli import (_enforce_output_schema, corpus_median_date,
+                     corpus_reference_date, fallback_prediction)
 from mib.lexicon import Lexicon
 from mib.policy import Calibration, apply_reference_date, corpus_revoked_sponsors
 from mib.pipeline import finalize
@@ -34,6 +35,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
     good = [r for r in rows if not r["failed"]]
     reference = corpus_reference_date([r["record"] for r in good])
     revoked = corpus_revoked_sponsors([r["record"] for r in good])
+    median_date = corpus_median_date([r["record"] for r in good])
 
     out: list[dict] = []
     for row in rows:
@@ -42,6 +44,8 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
                 row["case_id"], lexicon, calibration, row.get("reason", "?")).to_row())
             continue
         record = apply_reference_date(row["record"], reference, revoked)
+        if record.arrival_date == "unknown" and median_date:
+            row["printed"]["arrival_date"] = median_date
         prediction = finalize(row["printed"], record, row["note"], calibration,
                               adjudicator=adjudicator, features=row.get("features"))
         out.append(prediction.to_row())

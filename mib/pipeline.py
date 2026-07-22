@@ -45,7 +45,7 @@ from mib.policy import (
     Calibration,
     Record,
 )
-from mib.schema import Prediction
+from mib.schema import FALLBACK_ARRIVAL_DATE, FALLBACK_SPONSOR_ID, Prediction
 
 # Fields snapped onto a closed vocabulary.
 SNAP_FIELDS = ("species_code", "home_world", "visa_class", "declared_purpose")
@@ -254,9 +254,9 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
         if field == "applicant_name":
             printed[field] = lexicon.data["applicant_name"]["prior_mode"]
         elif field == "sponsor_id":
-            printed[field] = "SPN-1000"
+            printed[field] = FALLBACK_SPONSOR_ID
         elif field == "arrival_date":
-            printed[field] = "2026-04-01"
+            printed[field] = FALLBACK_ARRIVAL_DATE
         else:
             printed[field] = lexicon.prior_mode(field)
 
