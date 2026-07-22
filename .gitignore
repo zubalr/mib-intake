@@ -1,0 +1,11 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+tmp/
+out/
+scratch/
+*.zip
