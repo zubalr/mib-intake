@@ -27,10 +27,10 @@ docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
 
 | | |
 | --- | --- |
-| Out-of-fold score on train | **126.17 / 150** |
-| Extraction / classification / calibration | 43.64 / 66.42 / 16.12 |
-| Mean Brier | 0.097 |
-| Catastrophic false approvals | 16 / 1,000 |
+| Out-of-fold score on train | **126.03 ± 0.10 / 150** |
+| Extraction / classification / calibration | 43.73 / 66.24 / 16.05 |
+| Mean Brier | 0.099 |
+| Catastrophic false approvals | 18 / 1,000 |
 | Runtime | 1.77 s/PDF in-container (budget 6 s) |
 | Image size | 1.19 GB (limit 4 GiB) |
 | Model artifact | 1.5 MB (limit 250 MiB) |

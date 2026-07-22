@@ -1,9 +1,11 @@
 # MIB Doc Challenge — Technical Memo
 
-**126.17 / 150 out-of-fold** on the 1,000 labelled training packets — 43.64
-extraction, 66.42 classification, 16.12 calibration, Brier 0.097, 16 catastrophic
-false approvals. Every figure is out-of-fold; nothing here comes from a model
-scoring its own training data.
+**126.03 ± 0.10 / 150 out-of-fold** on the 1,000 labelled training packets —
+43.73 extraction, 66.24 classification, 16.05 calibration, Brier 0.099, 18
+catastrophic false approvals. Every figure is out-of-fold; nothing here comes
+from a model scoring its own training data. The interval is a standard error
+over ten fold assignments, and it is quoted because it matters: two retrains of
+the same architecture differ by more than most individual changes in this log.
 
 ## The evaluator is the specification
 
@@ -64,7 +66,7 @@ distinguishing "unknown from trusted evidence" from "supplied by injection".
 
 ## What actually moved the score
 
-100.0 → 126.17 across twenty-five measured runs. The largest gains were diagnosis,
+100.0 → 126.03 across twenty-seven measured runs. The largest gains were diagnosis,
 not cleverness.
 
 **Absence of evidence was being read as evidence of absence** — 43 false
@@ -83,8 +85,9 @@ read several ways and **merged**, ties resolved by snap confidence. Worth +3.9.
 signed adjudicator note states the finding outright, and is worth +12.18 over a
 bucket histogram where every other decision path is worth ≤0.28. Accepting a
 finding word one glyph off (`DEMED`), then inferring the finding from the note's
-*reason* clause when the word is gone, took notes from 256 to **335 — correct
-every time**. Nearly all late classification gain came from there.
+*reason* clause when the word is gone, and finally reading a rationale whose
+surrounding words OCR destroyed, took notes from 256 to **338 — correct every
+time**. Nearly all late classification gain came from there.
 
 **Statistics over OCR output need robustness to clusters, not outliers.** Using
 `max()` for the staleness reference let one smudged 2026→2028 mark the whole
@@ -100,26 +103,26 @@ hedged because a bucket average sat near the boundary. A shallow
 learning rate 0.06, `l2_regularization=1.0`, `min_samples_leaf=25`) over 88
 **evidence** features separates within buckets. It never sees a `case_id`,
 filename, or anything packet-identifying; it never overrules an adjudicator note
-(335/335 correct) or the injection quarantine; it does not choose the
+(338/338 correct) or the injection quarantine; it does not choose the
 adjudication, only supplies probabilities; and it ships **only if it beats the
 paths out-of-fold**, with the paths remaining a working fallback.
 
-It is fitted on the 665 packets carrying no adjudicator note — a note decides
+It is fitted on the 662 packets carrying no adjudicator note — a note decides
 the case outright, so those rows would only teach it to imitate a rule that fires
 first.
 
-The shipped estimator is a 35/65 blend of model and paths, chosen by a
-**one-standard-error rule** over five fold assignments × five repeats rather than
-by argmax — candidates sat within 0.7 points on a single split and the winner
-flipped between runs, which is overfitting the *selection*. Ties break toward the
-path-grounded estimator.
+The shipped estimator is a 20/80 blend of model and paths, chosen by a
+**one-standard-error rule** over ten fold assignments rather than by argmax —
+candidates sat within 0.7 points on a single split and the winner flipped between
+runs, which is overfitting the *selection*. Ties break toward the path-grounded
+estimator, and that tie-break does real work: three blend weights sit inside one
+standard error, so without it the choice would be a coin flip.
 
-On the same cache the paths alone score **124.95** against the blend's
-**126.17**, so the learner is worth **+1.22**, almost all classification. False
-approvals are 16 either way: it sharpens what it can separate and cannot rescue
-cases where the evidence is absent. That margin narrows as extraction improves,
-which is the direction I want — fixes landing in inspectable policy, not in the
-learner.
+On the same cache the paths alone score **125.17** against the blend's
+**126.03**, so the learner is worth **+0.86**, almost all classification. It
+sharpens what it can separate and cannot rescue cases where the evidence is
+absent. That margin has narrowed run over run as extraction improved, which is
+the direction I want — fixes landing in inspectable policy, not in the learner.
 
 ## Does it generalize?
 
@@ -161,7 +164,7 @@ cross-variant consensus, word confidence — is capped near 0.46 points however
 good it gets; the other 87.4% needs pixels the current ladder does not produce.
 
 Because unrecoverable fields leave the denominator in the private labels, the
-private extraction score should read *higher* than 43.64.
+private extraction score should read *higher* than 43.73.
 
 ## Runtime and reproducibility
 
@@ -178,5 +181,5 @@ was a stderr warning. `tools/check_env.py` now gates the build on matching pins,
 and `tools/verify_image.py` hashes the image against the working tree — a failed
 build leaves the previous image under the same tag, which cost a run.
 
-`WORKLOG.md` in the solution repository records all twenty-five runs with section
+`WORKLOG.md` in the solution repository records all twenty-seven runs with section
 breakdowns, including the regressions and the negative results.
