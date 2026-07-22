@@ -153,9 +153,10 @@ The ceiling is not 150. Some packets contradict their own labels (document says
 the worst field at 0.785, and it is also the most expensive — weight 8, 1.91
 points. 176 of its 215 misses are packets where we report no flags and the truth
 has some; 137 of those hold a scanned page the OCR ladder returns nothing from.
-The largest confusion cell (90 approvable cases hedged) is by contrast *already
-correct*: among packets with no readable risk page, P(approved) = P(denied) =
-0.381, so hedging beats approving 3.42 to 1.76 on expected value.
+The largest confusion cell — 73 approvable cases hedged to NEEDS_REVIEW — is by
+contrast *already correct*. On the `risk_page_unreadable` path the fitted
+distribution is 0.371 / 0.290 / 0.338, so hedging returns 4.03 in expected raw
+points against 2.15 for approving. The hedge is not caution, it is the argmax.
 
 Is the rest reachable by better arbitration or only by better recognition? On a
 150-packet sample, when a field is wrong the correct value was among the OCR
