@@ -231,6 +231,10 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
 
     fee_raw = _resolve(ev, "fee_status", lexicon)
     fee = UNKNOWN
+    # Did trusted evidence *state* a fee status? `unknown` is a value a receipt
+    # prints, and it is also the sentinel for having read nothing, so the two
+    # are indistinguishable downstream unless the distinction is captured here.
+    fee_observed = False
     if fee_raw:
         candidate = fee_raw.strip().lower()
         if candidate not in FEE_VALUES:
@@ -240,9 +244,12 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
             candidate = snapped.lower() if conf > 0.0 else candidate
         if candidate in FEE_VALUES:
             fee = candidate
+            fee_observed = True
 
-    # The record keeps UNKNOWN so the printed fallback cannot influence policy.
-    printed["fee_status"] = fee if fee != UNKNOWN else lexicon.prior_mode("fee_status")
+    # Print what the document said, including a stated "unknown" -- guessing the
+    # prior mode there overwrites a correct value with `paid`. The fallback is
+    # only for fields nothing trustworthy stated.
+    printed["fee_status"] = fee if fee_observed else lexicon.prior_mode("fee_status")
 
     flags = _derive_risk_flags(ev, lexicon)
     printed["risk_flags"] = "|".join(sorted(flags)) if flags else "none"
@@ -264,6 +271,7 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
         visa_class=resolved.get("visa_class", UNKNOWN),
         sponsor_id=resolved.get("sponsor_id", UNKNOWN),
         fee_status=fee,
+        fee_explicit_unknown=fee_observed and fee == UNKNOWN,
         arrival_date=resolved.get("arrival_date", UNKNOWN),
         risk_flags=frozenset(flags),
         receipt_date=None,

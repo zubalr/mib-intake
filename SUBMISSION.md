@@ -16,17 +16,24 @@ docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
   mib-intake /input /output/predictions.jsonl
 ```
 
-## Public-data estimate
+## Public-data results
 
-| Section | Score |
+| Section | Out of fold |
 | --- | ---: |
-| Extraction | 44.01 / 50 |
-| Classification | 67.09 / 80 |
-| Calibration | 16.27 / 20 |
-| Total | **127.38 ± 0.08 / 150** |
-| Mean confidence Brier | 0.0931 |
+| Extraction | 44.15 / 50 |
+| Classification | 67.88 / 80 |
+| Calibration | 16.50 / 20 |
+| Total | **128.53 ± 0.16 / 150** |
+| Mean confidence Brier | 0.0874 |
 
-All reported score estimates are out of fold.
+The total above is an out-of-fold estimate over ten fold assignments: each
+held-out prediction comes from a model that did not train on that packet. It is
+the figure to use for expected performance on unseen packets.
+
+The same Docker image scores **133.93 / 150** on the complete public training
+set. That number is reproducible but in-sample — the model was fitted on those
+rows — so it is reported for completeness rather than as a generalization
+estimate.
 
 ## Approach
 

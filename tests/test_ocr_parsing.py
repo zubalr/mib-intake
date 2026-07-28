@@ -293,3 +293,35 @@ class TestFeeFromReceipt:
     def test_needs_both_facts(self):
         assert parse_fields("Amount $809.00")[2].get("receipt_fee_status") is None
         assert parse_fields("Waiver Code N/A")[2].get("receipt_fee_status") is None
+
+
+class TestFeeStatedUnknown:
+    """`unknown` is both a printed fee value and the missing-evidence sentinel.
+
+    406 training packets carry the sentinel and only 42 are genuinely unknown,
+    so the two must not share a decision path or a printed fallback.
+    """
+
+    def _record(self, **kw):
+        return policy.Record(case_id="MIB-000001", visa_class="WORK-1",
+                             sponsor_id="SPN-1234", arrival_date="2026-02-01",
+                             risk_flags=frozenset(), **kw)
+
+    def test_a_stated_unknown_is_present_evidence(self):
+        record = self._record(fee_status=policy.UNKNOWN, fee_explicit_unknown=True)
+        assert policy.decision_path(record) == "fee_stated_unknown"
+
+    def test_an_unread_fee_is_still_the_missing_evidence_path(self):
+        record = self._record(fee_status=policy.UNKNOWN, fee_explicit_unknown=False)
+        assert policy.decision_path(record) != "fee_stated_unknown"
+
+    def test_a_stated_unknown_does_not_rescue_a_disqualified_packet(self):
+        # Present evidence, but it sits below the disqualifying rules: a stated
+        # unknown fee must not pull a revoked-sponsor packet out of DENIED.
+        record = self._record(fee_status=policy.UNKNOWN, fee_explicit_unknown=True,
+                              sponsor_revoked_in_packet=True)
+        assert policy.decision_path(record) != "fee_stated_unknown"
+
+    def test_a_read_fee_is_unaffected(self):
+        record = self._record(fee_status="paid", fee_explicit_unknown=False)
+        assert policy.decision_path(record) != "fee_stated_unknown"

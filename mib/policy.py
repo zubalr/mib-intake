@@ -226,6 +226,12 @@ class Record:
     # risk panel is in here somewhere and we could not read it" from "this
     # packet simply has no risk page", which are very different priors.
     has_scanned_pages: bool = False
+    # `fee_status == UNKNOWN` is overloaded. It is the sentinel for "no trusted
+    # evidence", and it is also a value a receipt can legitimately *print*. 406
+    # training packets carry the sentinel and only 42 are genuinely unknown, so
+    # the two cannot share a decision path: one is missing evidence, the other
+    # is present evidence with a documented rule behind it.
+    fee_explicit_unknown: bool = False
 
     def flag_set(self) -> frozenset[str]:
         return frozenset(f for f in self.risk_flags if f and f != "none")
@@ -292,6 +298,15 @@ def decision_path(record: Record) -> str:
         # "waived: acceptable only for DIP-1 or a visible hardship waiver."
         return "fee_waived_unjustified"
 
+    if record.fee_explicit_unknown:
+        # The receipt *states* the fee status is unknown. That is present
+        # evidence with a documented rule ("fee_status unknown -> NEEDS_REVIEW",
+        # 44/44 on train), not a gap in what we could read, so it belongs here
+        # rather than in tier 3 with the sentinel. It still sits below the
+        # disqualifying evidence above: a stated-unknown fee does not rescue a
+        # packet that a revoked sponsor or a disqualifying flag already denies.
+        return "fee_stated_unknown"
+
     # Staleness needs a readable arrival date, so it is present-evidence by
     # construction. `None` means undeterminable and falls through to tier 3.
     stale = _is_stale(record)
@@ -318,8 +333,20 @@ def decision_path(record: Record) -> str:
         # parse plausibly hides a flag; a packet with no risk page at all is a
         # different population with a much higher approval rate. Lumping them
         # gave one mushy 230-case bucket.
-        return "risk_page_unreadable" if record.has_scanned_pages \
-            else "risk_page_absent"
+        if record.has_scanned_pages:
+            # A medical visa whose risk panel could not be read is the one place
+            # the unread evidence is strongly predictable: MED-3 is the class an
+            # unobserved `biohazard_red` hides on, and the bucket is DENIED where
+            # the rest of the unreadable population is NEEDS_REVIEW.
+            #
+            # This is the only sub-split of this bucket that survives fitting out
+            # of sample: +0.41 classification points, unchanged across 20 fold
+            # assignments (+/-0.00). Every pairing with a second signal is worse
+            # and the four-way split is -0.47 -- 98 packets do not support more
+            # than one cut, and the in-sample gains of the others are noise.
+            return "risk_page_unreadable_med" if record.visa_class == "MED-3" \
+                else "risk_page_unreadable"
+        return "risk_page_absent"
     if record.fee_status == UNKNOWN:
         return "fee_unknown"
     if stale is None:

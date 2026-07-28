@@ -227,6 +227,33 @@ def _clean(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def _note_reason_facts(ev: PacketEvidence, reason: str, page_no: int) -> None:
+    """Record the field values a typed note's reason clause states outright.
+
+    Deliberately routed through the *same* `mib.ocr` parsers the scanned path
+    uses, rather than a second set of patterns here: two implementations of
+    "what does this reason clause assert" would drift, and the scanned one is
+    the one with measured purity behind it.
+
+    Risk flags named in a reason are **unioned** with what the panel gave, never
+    substituted -- a reason cites the governing flag, not the complete set, and
+    across the typed notes it is a true subset of the truth every time it
+    appears. Union preserves that; replacement would discard the panel's flags.
+    """
+    extras: dict[str, str] = {}
+    ocr_module._facts_from_reason(reason, extras)
+    if extras.get("reason_fee_status"):
+        _record(ev, "fee_status", extras["reason_fee_status"],
+                ADJUDICATOR, TRUST_ORDER[ADJUDICATOR], page_no)
+    if extras.get("reason_home_world"):
+        _record(ev, "home_world", extras["reason_home_world"],
+                ADJUDICATOR, TRUST_ORDER[ADJUDICATOR], page_no)
+    # Into `flag_candidates`, not `observed_flags`: no label vouches for a name
+    # inside prose, so it gets the strict snapping rule. `_derive_risk_flags`
+    # unions both channels into one set, which is the union this needs.
+    ev.flag_candidates.extend(ocr_module.mine_flag_candidates(reason))
+
+
 def parse_packet(pdf_path: Path | str) -> PacketEvidence:
     path = Path(pdf_path)
     spans = extract_spans(path)
@@ -288,6 +315,11 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
             if note:
                 ev.note_finding = note.group(1).upper()
                 ev.note_reason = note.group(2).strip()
+                # The reason clause states facts, not only a verdict. The
+                # scanned-note path has read them since run 28; the typed path
+                # never did, so a note that survived *perfectly* in the text
+                # layer gave up less than the same note read through OCR.
+                _note_reason_facts(ev, note.group(2), page_no)
 
             # A signed manual correction outranks the printed field beside it.
             correction = MANUAL_CORRECTION_RE.match(text)

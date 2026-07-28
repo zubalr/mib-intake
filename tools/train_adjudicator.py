@@ -133,6 +133,14 @@ def main() -> None:
                     help="Independent fold assignments. Selection uses the mean "
                          "across repeats plus its standard error, so it stops "
                          "chasing the noise of one particular split.")
+    ap.add_argument("--tie-break", choices=("conservative", "aggressive"),
+                    default="conservative",
+                    help="Which end of the one-standard-error set to ship. The "
+                         "rule identifies candidates that are statistically "
+                         "indistinguishable; choosing among them is a "
+                         "preference, not a measurement. `conservative` takes "
+                         "the lowest model weight (more policy prior, lower "
+                         "variance); `aggressive` takes the highest.")
     ap.add_argument("--oof-out", type=Path, default=None,
                     help="Write predictions.jsonl built from "
                          "out-of-fold probabilities, for official scoring.")
@@ -241,18 +249,24 @@ def main() -> None:
 
     # -- Selection: one-standard-error rule --------------------------------
     #
-    # Among statistically similar candidates, prefer the lower model weight.
-    # This retains more of the policy prior and reduces variance.
+    # The rule identifies the candidates that are statistically
+    # indistinguishable from the peak. Which of those to ship is a *preference*
+    # and is stated on the command line, because the measurement does not
+    # decide it: `conservative` keeps more of the policy prior and less
+    # variance, `aggressive` takes the largest model weight the evidence still
+    # supports. Reaching past the set is not on the menu either way.
     peak = max(results, key=lambda k: results[k]["mean"])
     threshold = results[peak]["mean"] - results[peak]["se"]
     within = [k for k in results if results[k]["mean"] >= threshold]
 
-    def conservatism(name: str) -> tuple:
+    def rank(name: str) -> tuple:
         info = results[name].get("_blend")
         weight = info[1] if info else 1.0
+        if args.tie_break == "aggressive":
+            return (-weight, -results[name]["mean"])
         return (weight, -results[name]["mean"])
 
-    best_name = min(within, key=conservatism)
+    best_name = min(within, key=rank)
     best = results[best_name]
     best_sum = best["mean"]
 
@@ -279,6 +293,7 @@ def main() -> None:
                               metadata={
         "kind": base_name,
         "blend_weight": blend_weight,
+        "tie_break": args.tie_break,
         "oof_classification": round(best["classification"], 3),
         "oof_calibration": round(best["calibration"], 3),
         "oof_accuracy": round(best["accuracy"], 4),

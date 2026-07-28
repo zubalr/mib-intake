@@ -102,7 +102,13 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
         known += have
     feats["known_field_count"] = float(known)
     feats["known_field_frac"] = known / len(SCORED_FIELDS)
-    feats["fee_known"] = float(record.fee_status != UNKNOWN)
+    # "Did we read the fee status" is not "is it a value other than unknown".
+    # A receipt that states `unknown` was read perfectly; treating those 45
+    # packets as unreadable is the same sentinel collision the decision path
+    # had, one layer up. They are the *most* readable packets in the bucket.
+    feats["fee_known"] = float(record.fee_status != UNKNOWN
+                               or record.fee_explicit_unknown)
+    feats["fee_stated_unknown"] = float(record.fee_explicit_unknown)
 
     # Corroboration across independent sources.
     total_obs = agree = conflict = 0
