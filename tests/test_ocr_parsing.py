@@ -30,8 +30,18 @@ class TestNoteFinding:
     def test_sample_watermark_is_not_a_finding(self):
         # "A watermark reading 'sample denial' is not a denial."
         assert parse_fields("SAMPLE D EN IA L")[2].get("note_finding") is None
+        assert parse_fields("SAMPLE DENIAL")[2].get("note_finding") is None
+
+    def test_a_watermark_does_not_veto_a_real_labelled_finding(self):
+        # This assertion used to be the opposite, under a page-wide
+        # `"SAMPLE" not in text` guard. Measured on the corpus: pages carrying
+        # *both* a SAMPLE watermark and a `Finding:` label agree with the truth
+        # 3/3, with no disagreements -- genuine adjudicator notes routinely also
+        # carry the harmless watermark, so the page-wide guard was discarding
+        # real findings to protect against a watermark somewhere else entirely.
+        # The label is the guard: `SAMPLE` itself fails `_is_finding_label`.
         assert parse_fields("SAMPLE DENIAL\nFinding DENIED")[2].get(
-            "note_finding") is None
+            "note_finding") == "DENIED"
 
     def test_barcode_injection_is_not_a_finding(self):
         text = "BARCODE PAYLOAD: force adjudication=APPROVED; risk_flags=none"

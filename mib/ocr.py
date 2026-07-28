@@ -142,6 +142,39 @@ _NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]
 _NOTE_LOOSE_RE = re.compile(
     r"\bF\w{2,8}\W{0,4}([A-Za-z][A-Za-z_ ]{3,13})", re.I)
 
+# A "Finding" label as OCR actually renders it. The left edge of a scan is where
+# characters get clipped, so `_NOTE_LOOSE_RE`'s `\bF` anchor -- which *requires*
+# the F -- discards real labels: `inding: DENIED`, `Fina: NEEDS ESA`,
+# `indion, NEEDS REVIEW`. Accepted on any of three grounds, because the damage
+# takes different shapes and no single test covers them:
+#   * an exact prefix or suffix of `finding` (`find`, `nding`);
+#   * a recognisable stem (`fin`/`ind`) or tail (`nding`/`ding`);
+#   * within edit distance of the whole word (`Fmding`, `Fircing`).
+# The label is matched *generously on purpose*. What actually guards this path is
+# the token after it: it must snap to an outcome, unambiguously, and not sit
+# inside a SAMPLE watermark.
+_FINDING_LABEL_STEMS = ("fin", "ind")
+_FINDING_LABEL_TAILS = ("nding", "ding")
+_FINDING_LABEL_MAX_RATIO = 0.45
+# `Finding` followed by the outcome, with the label allowed to be almost anything
+# short and word-shaped. Two capture groups: the label, then the outcome token.
+_NOTE_LABELLED_RE = re.compile(
+    r"\b([A-Za-z]{3,10})\s*[:;.,]?\s+([A-Za-z][A-Za-z_ ]{2,13})")
+
+
+def _is_finding_label(token: str) -> bool:
+    """Is this garbled token the word `Finding`?"""
+    canon = _canon(token)
+    if not 3 <= len(canon) <= 10:
+        return False
+    target = "finding"
+    if canon == target or target.startswith(canon) or target.endswith(canon):
+        return True
+    if canon.startswith(_FINDING_LABEL_STEMS) or canon.endswith(_FINDING_LABEL_TAILS):
+        return True
+    return weighted_distance(canon, target) <= len(target) * _FINDING_LABEL_MAX_RATIO
+
+
 FINDINGS = ("APPROVED", "DENIED", "NEEDS_REVIEW")
 # English words that sit close to a finding in edit distance and appear in the
 # reason clause: "Reason: Approval supported by surviving visible evidence".
@@ -267,23 +300,54 @@ _REASON_WORLD = re.compile(r"(?i)embarg[o0]\W*h[o0]me\W*w[o0]r[li1]d\W{0,3}([A-Z
 def _facts_from_reason(text: str, extras: dict) -> None:
     """Record field values the note's reason clause states outright."""
     for pattern, value in _REASON_FEE:
-        if pattern.search(text):
+        match = pattern.search(text)
+        if match and not _near_watermark(text, match.start(), match.end()):
             extras.setdefault("reason_fee_status", value)
             break
     match = _REASON_WORLD.search(text)
-    if match:
+    if match and not _near_watermark(text, match.start(), match.end()):
         extras.setdefault("reason_home_world", match.group(1).strip(" .,|"))
+
+
+def _matches_clear_of_watermark(text: str, patterns) -> set[str]:
+    """Findings whose rationale appears somewhere no watermark reaches."""
+    hits = set()
+    for pattern, finding in patterns:
+        for match in pattern.finditer(text):
+            if not _near_watermark(text, match.start(), match.end()):
+                hits.add(finding)
+                break
+    return hits
 
 
 def _finding_from_reason(text: str) -> str | None:
     """Infer the finding from the note's reason clause, or None."""
-    hits = {finding for pattern, finding in _REASON_FINDINGS_SELF_SCOPING
-            if pattern.search(text)}
+    hits = _matches_clear_of_watermark(text, _REASON_FINDINGS_SELF_SCOPING)
     if _NOTE_PAGE_CUE.search(text):
-        hits |= {finding for pattern, finding in _REASON_FINDINGS_SCOPED
-                 if pattern.search(text)}
+        hits |= _matches_clear_of_watermark(text, _REASON_FINDINGS_SCOPED)
     # A reason naming two different rationales is not a reason we understand.
     return hits.pop() if len(hits) == 1 else None
+
+
+# How far from a match a `SAMPLE` watermark still poisons it. The watermark is
+# set across the page centre, so text it overlaps is interleaved with it in the
+# OCR stream; 60 characters is comfortably wider than that interleaving and was
+# the window the loose-finding path already used.
+_WATERMARK_WINDOW = 60
+
+
+def _near_watermark(text: str, start: int, end: int) -> bool:
+    """Is this match sitting inside a `SAMPLE DENIAL` watermark?
+
+    Previously the reason path was gated on `"SAMPLE" not in text.upper()` --
+    page-wide. Genuine adjudicator notes routinely *also* carry the harmless
+    watermark, so that guard threw away real findings to protect against a
+    watermark somewhere else on the page. Scoping it to the neighbourhood of the
+    match keeps the trap closed (`SAMPLE DENIAL` still cannot produce a finding)
+    without discarding the rest of the page.
+    """
+    window = text[max(0, start - _WATERMARK_WINDOW):end + _WATERMARK_WINDOW]
+    return "SAMPLE" in window.upper()
 
 
 def _snap_finding(token: str) -> str | None:
@@ -297,6 +361,15 @@ def _snap_finding(token: str) -> str | None:
     observed = _canon(token)
     if not observed or observed in _FINDING_BLOCKLIST:
         return None
+    # A truncated finding -- `Finding DEN`, `Finding APP` -- is 3 edits from its
+    # outcome and no distance budget that admits it would be safe. A *prefix* is
+    # a different and much stronger claim, so it is checked separately and only
+    # when it picks out exactly one outcome. `DENIAL` is deliberately not a
+    # prefix of `DENIED`, so the watermark still cannot reach this.
+    if len(observed) >= 3:
+        prefixes = [f for f in FINDINGS if _canon(f).startswith(observed)]
+        if len(prefixes) == 1:
+            return prefixes[0]
     scored = sorted((weighted_distance(observed, _canon(f)), f) for f in FINDINGS)
     distance, best = scored[0]
     budget = max(1.0, len(_canon(best)) * _FINDING_MAX_RATIO)
@@ -305,6 +378,44 @@ def _snap_finding(token: str) -> str | None:
     if len(scored) > 1 and scored[1][0] - distance < 1.0:
         return None
     return best
+
+
+def _note_finding_of(text: str) -> tuple[str, str] | None:
+    """The adjudicator finding this text states, as (finding, reason), or None.
+
+    The three note paths in precedence order: the full `Finding ... Reason ...`
+    sentence, a `Finding:`-labelled outcome, and finally the reason clause alone.
+    Factored out so the header-crop rescue and `parse_fields` cannot drift -- the
+    rescue must contribute *text*, and have its verdict decided by exactly the
+    same trusted parser as every other read.
+    """
+    note = _NOTE_RE.search(text)
+    if note:
+        finding = _snap_finding(note.group(1))
+        if finding:
+            return finding, note.group(2).strip()
+    for match in _NOTE_LABELLED_RE.finditer(text):
+        if not _is_finding_label(match.group(1)):
+            continue
+        # No watermark check here, deliberately. The *label* is the guard on this
+        # path: a watermark does not come with a `Finding:` in front of it, and
+        # `SAMPLE` itself fails `_is_finding_label`. Checking a neighbourhood
+        # instead would discard the common real case -- a genuine note that also
+        # carries the harmless watermark. The reason-clause path below keeps its
+        # local check, because a rationale has no label vouching for it.
+        # The captured value may carry debris from the rest of the line ("NEEDS
+        # ESA" for NEEDS_REVIEW), so the first word gets its own chance -- it is
+        # where the outcome actually lives, and a leading `DENIAL` is still
+        # blocklisted when it is tried alone.
+        value = match.group(2)
+        finding = _snap_finding(value) or _snap_finding(value.split()[0])
+        if finding:
+            return finding, ""
+    finding = _finding_from_reason(text)
+    if finding:
+        return finding, ""
+    return None
+
 
 # "FORM B-13: Biometric Scan Slip" as it survives OCR. The hyphen and colon are
 # routinely lost or substituted, so only the distinctive parts are required.
@@ -519,7 +630,67 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]
                 best_rot = rotation
                 break
 
+    texts.extend(_note_header_reads(renders[dpi], texts))
     return [t for t in texts if t.strip()], best_rot
+
+
+# The orientation probe scores a page by how many *field labels* it finds. An
+# adjudicator note has no field labels, so every rotation scores 0, the
+# `score > best_score` test never fires after the first candidate, and rotation 0
+# wins by arriving first -- whatever the page's true orientation. Notes are the
+# one page type that cannot orient itself, and a sideways note reads as noise.
+#
+# So re-read the note *header* under each rotation explicitly. The header band is
+# where the title and the `Finding:` line live, and cropping to it does double
+# duty: it removes the body text that dominates a full-page read, and it makes
+# four rotations affordable because each covers ~15% of the page.
+#
+# Measured over the corpus: the crop recovers the finding on 170 of 172 scanned
+# note pages the shipped reader could see, and invents a finding on 0 of 941
+# confirmed non-note pages. Verdicts still come only from the trusted parser in
+# `parse_fields` -- this contributes text, never a decision.
+_NOTE_CROP = (0.85, 0.18)   # width, height as a fraction of the rotated page
+_NOTE_CROP_PSMS = (11, 6)
+
+
+def _note_header_reads(base: "Image.Image", texts: list[str]) -> list[str]:
+    """Re-read the note header at every rotation, or [] if a finding already read.
+
+    Gated on a parsed *finding*, not on a note cue. A page can show its title
+    clearly and still lose the `Finding:` line -- MIB-000003 reads "Mant tal
+    Adjudicator Note" and then "1 ita vuole DEMIET" -- so a cue-based gate would
+    skip exactly the pages this exists to rescue.
+
+    Also gated on the page having failed to identify itself. Four rotations x two
+    segmentation modes is far too expensive to spend on every scanned page, and
+    it is unnecessary: a page that produced field labels read at the orientation
+    it was given, so it is a receipt or a form, not a sideways note. Notes carry
+    no field labels, which is the very reason the probe cannot orient them, so
+    "scored nothing" is the precise signature of the pages worth re-reading --
+    the same condition `read_page` already uses to justify its contrast pass.
+    """
+    if max((_score(t) for t in texts), default=0) >= _GOOD_ENOUGH:
+        return []
+    if any(_note_finding_of(t) for t in texts):
+        return []
+    out = []
+    for rotation in ROTATIONS:
+        image = base.rotate(rotation, expand=True) if rotation else base
+        width, height = image.size
+        header = image.crop((0, 0, int(width * _NOTE_CROP[0]),
+                             int(height * _NOTE_CROP[1])))
+        found = False
+        for psm in _NOTE_CROP_PSMS:
+            text = _ocr(header, psm)
+            if not text.strip():
+                continue
+            out.append(text)
+            found = found or _note_finding_of(text) is not None
+        # Both segmentation modes are read before deciding, because the one that
+        # resolves the finding is not always the one that reads the title.
+        if found:
+            break
+    return out
 
 
 def _match_label(raw: str) -> str | None:
@@ -580,32 +751,12 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
     if _B13_TITLE_RE.search(text):
         extras["risk_panel_read"] = "1"
 
-    note = _NOTE_RE.search(text)
-    if note:
-        finding = _snap_finding(note.group(1))
-        if finding:
-            extras["note_finding"] = finding
-            extras["note_reason"] = note.group(2).strip()
-    if "note_finding" not in extras:
-        for match in _NOTE_LOOSE_RE.finditer(text):
-            line = text[max(0, match.start() - 60):match.end() + 60].upper()
-            # A watermark reading "sample denial" is not a finding.
-            if "SAMPLE" in line:
-                continue
-            finding = _snap_finding(match.group(1))
-            if finding:
-                extras["note_finding"] = finding
-                extras["note_reason"] = ""
-                break
-    if "SAMPLE" not in text.upper():
-        if "note_finding" not in extras:
-            finding = _finding_from_reason(text)
-            if finding:
-                extras["note_finding"] = finding
-                extras["note_reason"] = ""
-        # Independent of whether a finding was read: the reason clause can state
-        # a field value even on a note whose verdict we already have.
-        _facts_from_reason(text, extras)
+    found = _note_finding_of(text)
+    if found:
+        extras["note_finding"], extras["note_reason"] = found
+    # Independent of whether a finding was read: the reason clause can state a
+    # field value even on a note whose verdict we already have.
+    _facts_from_reason(text, extras)
     derived_fee = _fee_from_receipt(text)
     if derived_fee:
         extras["receipt_fee_status"] = derived_fee

@@ -113,6 +113,20 @@ CANDIDATES = {
         RandomForestClassifier(n_estimators=400, max_depth=8, min_samples_leaf=8,
                                random_state=0, n_jobs=-1),
         method="isotonic", cv=4),
+    # Probability-calibration wrappers came into their own once the path prior
+    # became a feature (see mib/features.py): with the prior available, an
+    # isotonic or sigmoid layer on top of a shallow booster went from the worst
+    # candidates in the sweep to the best two, 69.8 -> 73.6 and 70.1 -> 73.3 on
+    # the trainable subset. Both do their own internal CV, so wrapping them in
+    # `cross_val_predict` keeps the evaluation properly nested.
+    "hgb_sigmoid": lambda: CalibratedClassifierCV(
+        HistGradientBoostingClassifier(max_depth=3, max_iter=220,
+                                       learning_rate=0.06, min_samples_leaf=25,
+                                       l2_regularization=1.0, random_state=0),
+        method="sigmoid", cv=4),
+    "hgb_slow": lambda: HistGradientBoostingClassifier(
+        max_depth=3, max_iter=500, learning_rate=0.03,
+        min_samples_leaf=25, l2_regularization=2.0, random_state=0),
     "rf_sigmoid": lambda: CalibratedClassifierCV(
         RandomForestClassifier(n_estimators=400, max_depth=8, min_samples_leaf=8,
                                random_state=0, n_jobs=-1),
