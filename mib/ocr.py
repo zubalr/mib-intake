@@ -1,48 +1,9 @@
-"""OCR fallback for packet pages that carry no text layer.
+"""Local OCR for packet pages without a usable text layer.
 
-About 30% of scored fields live only on full-page scans (1224x1584 rasters with
-no text layer). Recovering them is the difference between ~35/50 and a
-competitive extraction score, and -- more importantly -- unread scans were the
-largest source of catastrophic false approvals, because a biometric slip we
-cannot read looks exactly like one that says "no risk flags".
-
-Four findings from prototyping on real pages drive the design:
-
-  * **Pages are rotated.** Scans appear at 90/180/270 degrees. Tesseract reads
-    almost nothing at the wrong orientation and reads cleanly at the right one,
-    so orientation must be resolved before anything else.
-  * **Contrast enhancement makes it worse.** The intuitive move -- autocontrast
-    and a contrast boost on washed-out text -- measurably *destroyed* readable
-    text: a page that OCR'd perfectly raw ("Home World: Europa Station |
-    Species Code: KAIJU_MICRO | Arrival Date: 2026-02-04") degraded to
-    "Home Word: Cwope Station". These scans are low-contrast but clean, and the
-    enhancement amplifies the scan-grid background into the glyphs. So we OCR
-    the raw grayscale and only fall back to enhancement if raw yields nothing.
-  * **Segmentation mode dominates everything else.** `--psm 6` ("one uniform
-    block of text") was the original choice and is simply wrong for these pages:
-    they are sparse labelled fields scattered across a form with table rules, so
-    Tesseract tries to read the rules as text and returns pipe soup. On a
-    representative intake scan, psm 6 recovered a single garbled value
-    (``Declored Purpose: verctotary I``) while `--psm 11` ("sparse text") read
-    the same page nearly whole -- species code, visa class, home world, purpose,
-    applicant and arrival date. That one flag was worth more than every other
-    OCR change combined.
-  * **No single configuration wins on every page**, which is why this module
-    returns *several* readings rather than one. Measured on four packets: one
-    page was read best by 200 dpi/psm 11, another only by 300 dpi/psm 12, a
-    third equally well by all of them. The variants disagree in a useful way --
-    each recovers fields the others drop -- so every variant's values are
-    recorded as candidates and the caller picks per field by lexicon-snap
-    confidence. Merging beats choosing.
-
-Orientation is chosen by scoring each candidate on how many *known field
-labels* it produces, rather than by Tesseract's own OSD: the labels are a closed
-set we already rely on, the score is meaningful on a page with only three lines
-of text, and it costs nothing extra.
-
-Budget: ~0.2-0.3 s per attempt, ~4 attempts per scanned page, ~3 scanned pages
-per packet. That is well inside the 6 s/packet scoring budget, of which the
-single-variant pipeline was using only 1.21 s.
+The reader resolves page orientation, evaluates several Tesseract segmentation
+configurations, and returns all plausible readings. Field-level arbitration is
+handled later by structural validation and vocabulary matching. Contrast
+enhancement is used only when the raw grayscale image yields no field labels.
 """
 
 from __future__ import annotations
@@ -62,17 +23,9 @@ except ImportError:  # pragma: no cover - image ships with both
     _OCR_AVAILABLE = False
 
 RENDER_DPI = 200
-# Segmentation mode used to resolve orientation. psm 11 is both the best reader
-# of these pages and therefore the best orientation discriminator -- it finds
-# the most labels, which is exactly what the orientation score counts.
+# Segmentation mode used to resolve orientation.
 PROBE_PSM = 11
-# Additional readings taken at the resolved orientation. Deliberately small and
-# diverse rather than an exhaustive sweep: each entry earned its place by being
-# the *only* configuration that read some page in the sample.
-#   200/11 -- the probe pass, reused for free
-#   200/6  -- the original mode; still wins on dense receipt pages
-#   300/12 -- sparse text with OSD; recovered pages all others returned empty
-#   300/11 -- higher resolution helps small type on the biometric slip
+# Additional readings at the selected orientation.
 VARIANTS = ((200, 11), (200, 6), (300, 12), (300, 11))
 # 0 first: unrotated pages are the common case and win on the early exit.
 ROTATIONS = (0, 90, 270, 180)
@@ -84,18 +37,8 @@ OCR_LABELS = {
     "home world": "home_world",
     "species code": "species_code",
     "species match": "species_code",
-    # The intake form writes "Declared Purpose:" and "Home World:"; the sponsor
-    # letter abbreviates to "Purpose:" and "World:". The short forms were absent
-    # entirely, so a *perfectly read* sponsor-letter line failed to parse -- which
-    # is why declared_purpose (40%) and home_world had the highest recoverable
-    # rates in the corpus.
-    #
-    # Restricted to closed-vocabulary fields on purpose. Measured over 851
-    # scanned packets, these three recover 42 values and break **zero**, because
-    # a spurious capture has to survive `Lexicon.snap` against a 10-13 value set
-    # and does not. The same treatment for free-text fields (sponsor id, arrival
-    # date, applicant name, fee status) breaks far more than it fixes -- nothing
-    # rejects a plausible-looking string.
+    # Sponsor letters use shorter labels than intake forms. Short aliases are
+    # restricted to fields whose vocabulary matcher rejects spurious captures.
     "purpose": "declared_purpose",
     "world": "home_world",
     "species": "species_code",
@@ -124,35 +67,13 @@ _SEP_RE = re.compile(r"\s*[:;.=]\s*")
 # usually crisp (it is set in a larger face) even when the surrounding text is not.
 _NOTE_RE = re.compile(r"Finding\s*[:;.]?\s*([A-Za-z_]+)\s*[.,]?\s*Reason\s*[:;.]?\s*(.+)",
                       re.I)
-# The same note when the reason clause did not survive the scan.
-#
-# `_NOTE_RE` requires both halves, so a page reading `Finding APPROVED` with the
-# reason washed out was discarded entirely -- even though the finding word is
-# the part that actually decides the case, and is set in a heavier face that
-# survives when the body text does not. Observed forms: "Finding APPROVED",
-# "Firing APPROVED :", "Fircing. APPROVED" -- the *label* is garbled while the
-# finding is crisp, so the pattern anchors on the finding word and only asks for
-# some F-word immediately before it.
-#
-# Two things this must not match, and does not:
-#   "SAMPLE D EN IA L"                              -- the watermark trap; the
-#       word is DENIAL, not DENIED, and no F-token precedes it.
-#   "BARCODE PAYLOAD: force adjudication=APPROVED"  -- "force" is an F-token but
-#       "adjudication=" is far too long to bridge the 4-character gap.
+# Note finding without a surviving reason clause.
 _NOTE_LOOSE_RE = re.compile(
     r"\bF\w{2,8}\W{0,4}([A-Za-z][A-Za-z_ ]{3,13})", re.I)
 
-# A "Finding" label as OCR actually renders it. The left edge of a scan is where
-# characters get clipped, so `_NOTE_LOOSE_RE`'s `\bF` anchor -- which *requires*
-# the F -- discards real labels: `inding: DENIED`, `Fina: NEEDS ESA`,
-# `indion, NEEDS REVIEW`. Accepted on any of three grounds, because the damage
-# takes different shapes and no single test covers them:
-#   * an exact prefix or suffix of `finding` (`find`, `nding`);
-#   * a recognisable stem (`fin`/`ind`) or tail (`nding`/`ding`);
-#   * within edit distance of the whole word (`Fmding`, `Fircing`).
-# The label is matched *generously on purpose*. What actually guards this path is
-# the token after it: it must snap to an outcome, unambiguously, and not sit
-# inside a SAMPLE watermark.
+# OCR can clip or distort the Finding label. The following matcher accepts
+# recognizable stems and bounded edit distance. Outcome snapping and watermark
+# checks provide the precision guard.
 _FINDING_LABEL_STEMS = ("fin", "ind")
 _FINDING_LABEL_TAILS = ("nding", "ding")
 _FINDING_LABEL_MAX_RATIO = 0.45
@@ -176,54 +97,25 @@ def _is_finding_label(token: str) -> bool:
 
 
 FINDINGS = ("APPROVED", "DENIED", "NEEDS_REVIEW")
-# English words that sit close to a finding in edit distance and appear in the
-# reason clause: "Reason: Approval supported by surviving visible evidence".
-# `approval` is two substitutions from `approved`, which no sane threshold
-# separates -- so it is excluded by name rather than by distance.
+# Nearby non-outcome words that must not snap to a finding.
 _FINDING_BLOCKLIST = frozenset({
     "approval", "approvals", "denial", "denials",
     "review", "reviewed", "reviewer",
 })
-# Smallest budget that reads every observed misspelling. Measured against 12
-# real OCR renderings and 17 near-miss words from the same pages: 12/12 recall,
-# 0/17 false positives, and stable up to 0.45.
+# Edit-distance threshold for a finding token.
 _FINDING_MAX_RATIO = 0.35
 
 
-# When the finding word itself is destroyed but the reason clause survives, the
-# reason states the governing rationale -- and the rationale determines the
-# outcome. Measured over the 319 notes we can already read, each of these
-# openings maps to one finding with the purity shown:
-#
-#   "Disqualifying risk flag: ..."          DENIED         32/32
-#   "Clean or exception-qualified packet"   APPROVED       28/28
-#   "Transit class cannot authorize ..."    DENIED         12/12
-#   "Denial supported by ..."               DENIED         11/11
-#   "Arrival date missing from trusted ..." NEEDS_REVIEW   10/10
-#   "Packet contains damaged or contra..."  NEEDS_REVIEW     8/8
-#   "Review-only risk flag present: ..."    NEEDS_REVIEW   27/29
-#   "Approval supported by ..."             APPROVED         5/5
-#
-# This is still reading the signed note -- the top evidence tier -- just a
-# different sentence of it. Anchored on the distinctive words rather than the
-# whole phrase, since OCR eats the rest, and only consulted when no finding word
-# could be read at all.
+# A note rationale can identify the finding when the outcome token is unreadable.
+# These patterns are consulted only when no finding token can be recovered.
 # Split by whether the phrase needs the page identified as a note first, and
 # `\W*` rather than `\s+` between words throughout -- OCR wedges pipes and stray
 # marks *inside* a phrase, and "Clean or exce| tion-qualified" broke a pattern
 # that only tolerated whitespace.
 #
-# A rationale that is a **complete sentence opening from the manual** identifies
-# the page by itself: these phrases occur nowhere in this corpus except an
-# adjudicator note, so demanding a separate note-page cue only discards them.
-# That is not hypothetical. MIB-000333 reads
-#
-#     "Manu... . _judicator Note ... Reascr, Clean or exception-qualifled packet."
-#
-# where the rationale survives *intact* while every scope cue is destroyed at
-# once: `Adjudicator` lost its "Ad", `Manual` its "l", `Reason` became "Reascr".
-# The guard was rejecting notes on the strength of damage to the words *around*
-# the evidence.
+# Complete manual sentence openings can identify the note without a separate
+# page-title cue: only an adjudicator writes them, so demanding a note-page cue
+# as well would discard them for no gain in precision.
 _REASON_FINDINGS_SELF_SCOPING = (
     (re.compile(r"(?i)den[il1]a[li1]\W*supp"), "DENIED"),
     (re.compile(r"(?i)c[li1]ean\W*or\W*exce"), "APPROVED"),
@@ -246,21 +138,9 @@ _REASON_FINDINGS_SCOPED = (
 _NOTE_PAGE_CUE = re.compile(r"(?i)adjud|manua[li1]\s*n|r?eason\s*[:;.]")
 
 
-# A fee receipt states the fee three ways, not one:
-#
-#     Fee Status | paid    Amount | $809.00   Waiver Code | N/A
-#     Fee Status | waived  Amount | $0.00     Waiver Code | DIP-WAIVER
-#
-# so when the status line is destroyed -- or contradicted, which this corpus does
-# deliberately -- the other two still say what it was. Measured over 400 packets:
-#
-#     positive amount + no waiver code -> paid    118/118 = 100%
-#     zero amount + a waiver code      -> waived   37/37  = 100%
-#     zero amount + no waiver code     -> unpaid   12/22  =  55%   <- rejected
-#
-# The third is genuinely ambiguous (unpaid vs unknown), so it is not derived.
-# This is *corroborating* evidence at the same trust tier as the status line, not
-# a guess: it is printed on the same page by the same authority.
+# Amount and waiver code provide corroborating fee evidence when the status
+# label is unreadable. Zero amount without a waiver is ambiguous and is not
+# resolved here.
 _AMOUNT_RE = re.compile(r"(?i)am[o0c]unt\W{0,4}\$?\s*([\d,]+(?:[.,]\d{2})?)")
 _WAIVER_CODE_RE = re.compile(r"(?i)wa[il1]ver\s*c[o0]de\W{0,4}([A-Za-z0-9\-/]{2,20})")
 _NO_WAIVER = frozenset({"N/A", "NA", "NONE", "N/4", "WA"})
@@ -284,12 +164,7 @@ def _fee_from_receipt(text: str) -> str | None:
     return None
 
 
-# The reason clause states facts as well as a verdict. "Mandatory fee unpaid"
-# and "Fee status unknown" name the fee status outright, on the signed note --
-# the top evidence tier, not a guess. Both are 100% pure across the 338 readable
-# notes; `embargo home world: X` also names a field but its *finding* is only 67%
-# pure, and that impurity is about the verdict, not the world, so the world is
-# safe to read even though the verdict is not.
+# A signed note reason can also state fee status or home world explicitly.
 _REASON_FEE = (
     (re.compile(r"(?i)mandat[o0]ry\W*fee\W*unpa[il1]d"), "unpaid"),
     (re.compile(r"(?i)fee\W*status\W*unkn[o0]wn"), "unknown"),
@@ -325,7 +200,7 @@ def _finding_from_reason(text: str) -> str | None:
     hits = _matches_clear_of_watermark(text, _REASON_FINDINGS_SELF_SCOPING)
     if _NOTE_PAGE_CUE.search(text):
         hits |= _matches_clear_of_watermark(text, _REASON_FINDINGS_SCOPED)
-    # A reason naming two different rationales is not a reason we understand.
+    # Reject conflicting rationale matches.
     return hits.pop() if len(hits) == 1 else None
 
 
@@ -337,15 +212,7 @@ _WATERMARK_WINDOW = 60
 
 
 def _near_watermark(text: str, start: int, end: int) -> bool:
-    """Is this match sitting inside a `SAMPLE DENIAL` watermark?
-
-    Previously the reason path was gated on `"SAMPLE" not in text.upper()` --
-    page-wide. Genuine adjudicator notes routinely *also* carry the harmless
-    watermark, so that guard threw away real findings to protect against a
-    watermark somewhere else on the page. Scoping it to the neighbourhood of the
-    match keeps the trap closed (`SAMPLE DENIAL` still cannot produce a finding)
-    without discarding the rest of the page.
-    """
+    """Return whether a match overlaps a SAMPLE watermark."""
     window = text[max(0, start - _WATERMARK_WINDOW):end + _WATERMARK_WINDOW]
     return "SAMPLE" in window.upper()
 
@@ -353,19 +220,12 @@ def _near_watermark(text: str, start: int, end: int) -> bool:
 def _snap_finding(token: str) -> str | None:
     """Nearest adjudication outcome to a garbled finding word, or None.
 
-    A note dictates the decision outright, so this is the highest-consequence
-    fuzzy match in the system and is correspondingly strict: an ambiguous token
-    (two outcomes within one edit of each other) is rejected rather than
-    guessed, because a confidently wrong finding is far worse than no finding.
+    Ambiguous tokens are rejected.
     """
     observed = _canon(token)
     if not observed or observed in _FINDING_BLOCKLIST:
         return None
-    # A truncated finding -- `Finding DEN`, `Finding APP` -- is 3 edits from its
-    # outcome and no distance budget that admits it would be safe. A *prefix* is
-    # a different and much stronger claim, so it is checked separately and only
-    # when it picks out exactly one outcome. `DENIAL` is deliberately not a
-    # prefix of `DENIED`, so the watermark still cannot reach this.
+    # Accept an unambiguous prefix before applying edit distance.
     if len(observed) >= 3:
         prefixes = [f for f in FINDINGS if _canon(f).startswith(observed)]
         if len(prefixes) == 1:
@@ -419,14 +279,11 @@ def _note_finding_of(text: str) -> tuple[str, str] | None:
 
 # "FORM B-13: Biometric Scan Slip" as it survives OCR. The hyphen and colon are
 # routinely lost or substituted, so only the distinctive parts are required.
-_B13_TITLE_RE = re.compile(r"B\s*[-—._]?\s*13\b|Biometric\s+Scan", re.I)
+_B13_TITLE_RE = re.compile(r"B\s*[-\u2014._]?\s*13\b|Biometric\s+Scan", re.I)
 # "Disqualifying risk flag: biohazard_red." / "Review-only risk flag present: x."
 _NOTE_FLAG_RE = re.compile(r"risk flag(?:\s+present)?\s*[:;.]\s*([a-z_]+)", re.I)
 
-# Matching on the *label* is fragile: OCR drops the colon and garbles the word
-# ("Reason Disqualifying nsk flag biohazard_red"). The flag names themselves are
-# far more distinctive than the label around them -- two underscore-joined words
-# that will not occur by accident -- so scan for them directly.
+# Flag literals are more stable than their surrounding OCR labels.
 #
 # Safe against the hidden-text injection: white-on-white text is invisible in a
 # rendered raster, so OCR never sees the planted "answer key" at all.
@@ -438,24 +295,8 @@ _FLAG_LITERALS = (
 _FLAG_LITERAL_RE = re.compile(
     "|".join(name.replace("_", r"[_\s\-]?") for name in _FLAG_LITERALS), re.I)
 
-# Near-misses the literal scan cannot reach, because it requires the flag name
-# to survive OCR intact. Real examples from packets whose truth carried the
-# flag: "ilegible_biometrine", "Kientity_confilct", "sponser_mismatch". Each is
-# one or two glyphs from correct and each was being thrown away whole.
-#
-# `illegible_biometrics` alone was missed on 111 of 1,000 packets -- the single
-# largest extraction loss in the corpus, because `risk_flags` carries 8 raw
-# points, more than any other field.
-#
-# Restricted to **underscore-joined pairs** and never bare words. That is not
-# cosmetic: measured against 25 real non-flag tokens from these pages, pair-only
-# mining produced zero false positives, while allowing bare words made
-# ``Sponsor`` (from "Sponsor ID: SPN-4040") snap to `sponsor_mismatch` at
-# confidence 0.47. Inventing a risk flag is expensive twice over -- it loses the
-# 8-point field and can force a wrong DENIED through the disqualifying path.
-#
-# These are emitted as *candidates*; `mib.lexicon.snap_flag` arbitrates, and
-# anything that does not resemble a flag is dropped with confidence 0.
+# Candidate mining is restricted to underscore-joined pairs. Resolution remains
+# in ``Lexicon.snap_flag``.
 _FLAG_CANDIDATE_RE = re.compile(r"\b[A-Za-z]{3,}_[A-Za-z]{2,}\b")
 
 # Page furniture OCR sweeps into a value when it sits on the same scan line.
@@ -468,25 +309,8 @@ _FURNITURE_RE = re.compile(
 
 # --- Literal mining -------------------------------------------------------
 #
-# Two fields have a rigid shape that no vocabulary can express but a regex can:
-# `sponsor_id` is always ``SPN-\d{4}`` and `arrival_date` is always an ISO date.
-# That rigidity is worth exploiting, because it is exactly where OCR fails in a
-# *repairable* way. Sampling twelve packets that lost their sponsor showed:
-#
-#     want SPN-7185   OCR read "Sponsor ID: SPN-T185"
-#     want SPN-8734   OCR read "Sponsor 1D: SPN8T34" / "SPN.S734"
-#     want SPN-8509   OCR read "Sponsor ID: [SPONSOR ID BLANK]"   <- truly gone
-#
-# The first two are one letter/digit confusion away from correct and were being
-# thrown away wholesale, because `SPN-T185` fails the `^SPN-\d{4}$` structural
-# check that (rightly) protects the official validator. Repairing the confusion
-# *inside* the token, then validating, recovers them without weakening the
-# check: nothing reaches the record unless it is a well-formed sponsor id.
-#
-# Only substitutions where the glyphs genuinely collide are listed. `E->5` was
-# observed once and deliberately left out -- a single sample is not evidence,
-# and a wrong-but-valid sponsor id is worse than none, because sponsor identity
-# feeds the revoked-sponsor policy path.
+# Sponsor IDs and dates have rigid shapes that support conservative glyph repair
+# before structural validation.
 _DIGIT_REPAIR = str.maketrans({
     "O": "0", "o": "0", "Q": "0", "D": "0",
     "I": "1", "l": "1", "i": "1", "|": "1",
@@ -504,7 +328,9 @@ _DIGIT_REPAIR = str.maketrans({
 _SPONSOR_MINE_RE = re.compile(r"[S5][PR]N[\s.:;,\-_]{0,3}([0-9A-Za-z|]{4})(?![0-9])")
 # Date separators survive worse than the digits do.
 _DATE_MINE_RE = re.compile(
-    r"(?<![0-9])([0-9A-Za-z|]{4})[\s.\-–—/]([0-9A-Za-z|]{2})[\s.\-–—/]([0-9A-Za-z|]{2})(?![0-9])")
+    r"(?<![0-9])([0-9A-Za-z|]{4})[\s.\-\u2013\u2014/]"
+    r"([0-9A-Za-z|]{2})[\s.\-\u2013\u2014/]"
+    r"([0-9A-Za-z|]{2})(?![0-9])")
 
 
 def _to_digits(token: str) -> str | None:
@@ -589,11 +415,8 @@ def _ocr(image: "Image.Image", psm: int, rotation: int = 0) -> str:
 def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]:
     """OCR one page several ways. Returns (texts, rotation_used).
 
-    Orientation is resolved once with the cheap probe pass -- it is a property
-    of the page, not of the configuration -- and every remaining variant is then
-    read at that orientation. Returning the full list rather than a single
-    "best" text is the point: the variants recover overlapping but different
-    field sets, and the caller merges them per field.
+    Orientation is resolved once with the probe pass. Remaining variants use the
+    same orientation, and the caller merges their field candidates.
     """
     if not _OCR_AVAILABLE:
         return [], 0
@@ -617,9 +440,7 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]
             renders[vdpi] = _render(page, vdpi)
         texts.append(_ocr(renders[vdpi], psm, best_rot))
 
-    # Only now, having failed on the raw image under every configuration, is
-    # enhancement worth trying -- it helps genuinely faint scans but harms
-    # merely low-contrast ones.
+    # Enhancement is reserved for pages with no labels in the raw image.
     if max((_score(t) for t in texts), default=0) <= 0:
         enhanced = ImageEnhance.Contrast(
             ImageOps.autocontrast(renders[dpi], cutoff=1)).enhance(2.0)
@@ -634,62 +455,43 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]
     return [t for t in texts if t.strip()], best_rot
 
 
-# The orientation probe scores a page by how many *field labels* it finds. An
-# adjudicator note has no field labels, so every rotation scores 0, the
-# `score > best_score` test never fires after the first candidate, and rotation 0
-# wins by arriving first -- whatever the page's true orientation. Notes are the
-# one page type that cannot orient itself, and a sideways note reads as noise.
-#
-# So re-read the note *header* under each rotation explicitly. The header band is
-# where the title and the `Finding:` line live, and cropping to it does double
-# duty: it removes the body text that dominates a full-page read, and it makes
-# four rotations affordable because each covers ~15% of the page.
-#
-# Measured over the corpus: the crop recovers the finding on 170 of 172 scanned
-# note pages the shipped reader could see, and invents a finding on 0 of 941
-# confirmed non-note pages. Verdicts still come only from the trusted parser in
-# `parse_fields` -- this contributes text, never a decision.
+# Adjudicator notes have no normal field labels, so the orientation probe cannot
+# select their rotation. Re-read the header crop at each orientation.
 _NOTE_CROP = (0.85, 0.18)   # width, height as a fraction of the rotated page
 _NOTE_CROP_PSMS = (11, 6)
+# Try every right-angle orientation before the small deskew variants.
+_NOTE_DESKEW = (0, -6, 6)
 
 
 def _note_header_reads(base: "Image.Image", texts: list[str]) -> list[str]:
-    """Re-read the note header at every rotation, or [] if a finding already read.
-
-    Gated on a parsed *finding*, not on a note cue. A page can show its title
-    clearly and still lose the `Finding:` line -- MIB-000003 reads "Mant tal
-    Adjudicator Note" and then "1 ita vuole DEMIET" -- so a cue-based gate would
-    skip exactly the pages this exists to rescue.
-
-    Also gated on the page having failed to identify itself. Four rotations x two
-    segmentation modes is far too expensive to spend on every scanned page, and
-    it is unnecessary: a page that produced field labels read at the orientation
-    it was given, so it is a receipt or a form, not a sideways note. Notes carry
-    no field labels, which is the very reason the probe cannot orient them, so
-    "scored nothing" is the precise signature of the pages worth re-reading --
-    the same condition `read_page` already uses to justify its contrast pass.
-    """
+    """Re-read a possible note header when the normal OCR pass found no fields."""
     if max((_score(t) for t in texts), default=0) >= _GOOD_ENOUGH:
         return []
     if any(_note_finding_of(t) for t in texts):
         return []
     out = []
-    for rotation in ROTATIONS:
-        image = base.rotate(rotation, expand=True) if rotation else base
-        width, height = image.size
-        header = image.crop((0, 0, int(width * _NOTE_CROP[0]),
-                             int(height * _NOTE_CROP[1])))
-        found = False
-        for psm in _NOTE_CROP_PSMS:
-            text = _ocr(header, psm)
-            if not text.strip():
-                continue
-            out.append(text)
-            found = found or _note_finding_of(text) is not None
-        # Both segmentation modes are read before deciding, because the one that
-        # resolves the finding is not always the one that reads the title.
-        if found:
-            break
+    # Angle is the outer loop so every rotation is tried upright before any tilt
+    # is considered: a page that is merely sideways costs nothing extra.
+    for angle in _NOTE_DESKEW:
+        for rotation in ROTATIONS:
+            image = base.rotate(rotation, expand=True) if rotation else base
+            width, height = image.size
+            header = image.crop((0, 0, int(width * _NOTE_CROP[0]),
+                                 int(height * _NOTE_CROP[1])))
+            if angle:
+                header = header.rotate(angle, expand=True, fillcolor=255)
+            found = False
+            for psm in _NOTE_CROP_PSMS:
+                text = _ocr(header, psm)
+                if not text.strip():
+                    continue
+                out.append(text)
+                found = found or _note_finding_of(text) is not None
+            # Both segmentation modes are read before deciding, because the one
+            # that resolves the finding is not always the one that reads the
+            # title.
+            if found:
+                return out
     return out
 
 

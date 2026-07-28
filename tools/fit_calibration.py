@@ -4,12 +4,12 @@
 The calibration table doubles as the classifier: `policy.decide` takes the
 expected-value argmax over these probabilities, and reports the probability of
 the chosen outcome as the confidence. Because the evaluator's calibration term
-is a proper scoring rule (Brier), fitting honest empirical frequencies is
+is a proper scoring rule (Brier), fitting empirical frequencies is
 simultaneously the classification-optimal and calibration-optimal choice.
 
 Smoothing matters. A path seen 8 times that happened to be 8/8 DENIED must not
-report probability 1.0 -- that is exactly the overconfidence the Brier term
-punishes. We shrink each path toward the global prior with a Dirichlet-style
+report probability 1.0 because the Brier term penalizes overconfidence.
+Each path is shrunk toward the global prior with a Dirichlet-style
 pseudocount.
 
 Usage:
@@ -40,8 +40,7 @@ def record_from_label_row(row: dict, receipt_date: str | None) -> Record:
     This measures the policy ceiling: how well the rules would do given perfect
     extraction. Document-only evidence (stamps, waivers, diplomatic notes) is
     not present in the labels, so those stay False here and the calibration
-    absorbs their effect as within-path variance -- which is precisely what we
-    want the confidence to reflect.
+    absorbs their effect as within-path variance.
     """
     flags = frozenset(f.strip() for f in row["risk_flags"].split("|")
                       if f.strip() and f.strip() != "none")
@@ -87,14 +86,13 @@ def main() -> None:
         }
 
     # A packet we could not read at all is not drawn from the same distribution
-    # as the corpus, so the global prior is the wrong reference class -- and on
+    # as the corpus, so the global prior is the wrong reference class. On
     # the global prior the EV of DENIED beats NEEDS_REVIEW by 0.05 raw points,
     # which is noise, not signal. FIELD_MANUAL.md is explicit that an illegible
     # packet is a NEEDS_REVIEW, and an unreadable packet is illegible by
     # definition. This prior encodes that policy rather than a label statistic.
     #
-    # TODO: replace with a measured distribution once we can identify which
-    # training packets our own extractor fails to read.
+    # This prior follows the field-manual requirement for illegible packets.
     paths[UNREADABLE_PATH] = {"APPROVED": 0.12, "DENIED": 0.28, "NEEDS_REVIEW": 0.60}
 
     payload = {

@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
-"""Assert a built Docker image matches the current working tree.
+"""Assert that a built Docker image matches the current working tree.
 
-Why this is a script and not a habit:
-
-A `docker build` that fails partway leaves the *previous* image in place under
-the same tag. Nothing errors on the next `docker run` -- it simply runs older
-code. That happened here: a build hit a BuildKit deadline, and the next
-container run produced 40 well-formed predictions and exited 0 while missing a
-policy change made twenty minutes earlier. The only reason it was caught was an
-expected log line that did not appear.
-
-Every failure mode in this project that actually cost something has been silent
-(a pickle read by the wrong scikit-learn, a feature computed before the corpus
-statistic existed, a stale extraction cache). This is the same shape, so it gets
-the same treatment: an explicit check with a non-zero exit.
+The check hashes every source and policy file copied into the image. It prevents
+a failed build from leaving an older image under the requested tag.
 
 Usage:
     PYTHONPATH=. python tools/verify_image.py mib-intake:final

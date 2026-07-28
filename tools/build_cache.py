@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Extract every packet once and cache the result.
-
-Extraction (PDF parse + OCR) is ~99% of pipeline cost; adjudication is
-microseconds. Before this, each measurement cycle re-extracted all 1,000
-training packets **twice** -- once to refit calibration, once to score --
-costing ~20 minutes per experiment. With a cache, extraction happens once and
-every downstream experiment (calibration refit, model training, decision-rule
-changes, scoring) runs in seconds against the cached evidence.
+"""Extract each packet once and cache the result.
 
 The cache is also the training set for the learned adjudicator: it stores the
 feature vector alongside the record, so `tools/train_adjudicator.py` never
@@ -14,7 +7,7 @@ touches a PDF.
 
 Rebuild the cache whenever anything in the extraction path changes
 (`mib/extract.py`, `mib/ocr.py`, `mib/pdfio.py`, `mib/lexicon.py`,
-`mib/features.py`). A stale cache silently measures the wrong system, so the
+`mib/features.py`). The
 cache records a fingerprint of those files and consumers warn on mismatch.
 
 Usage:

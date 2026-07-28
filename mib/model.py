@@ -1,31 +1,8 @@
-"""Learned adjudicator: probabilities from evidence, decision from the payoff matrix.
+"""Probability model for cases not settled by deterministic policy evidence.
 
-Why a model at all, when a hand-written policy already scores 116.88:
-
-The decision paths are a 16-bucket histogram. Every packet landing on
-`risk_page_unreadable` receives the identical probability vector, even though
-packets inside that bucket differ in ways that clearly predict the outcome --
-how many fields we recovered, whether the biometric confidence was 62% or 94%,
-how damaged the packet is, how far past the staleness line the arrival date sits.
-With bucket averages sitting near the decision boundary, **208 decidable cases
-were hedged to NEEDS_REVIEW**, worth ~12.5 classification points. No amount of
-further hand-splitting fixes that; the buckets get small and the thresholds get
-arbitrary, which is both weaker and reads worse under anti-gaming review.
-
-`EVALUATION.md` permits this explicitly: "small task-specific models, and
-candidate-trained models are allowed if they fit the size limits and run
-offline." The artifact is a few hundred KB against a 250 MiB cap.
-
-What the model does **not** get to do:
-
-  * It never sees a `case_id`, filename, or anything packet-identifying -- only
-    `mib.features` output, which is a description of the *evidence*.
-  * It never overrules an adjudicator note (217/217 correct) or the injection
-    quarantine. Those stay hard rules, because they are policy, not statistics.
-  * It does not choose the adjudication. It emits calibrated probabilities; the
-    decision is still the expected-value argmax over 8090's own payoff matrix,
-    exactly as before. Swapping the probability source leaves the decision
-    theory untouched.
+The model receives document-evidence features only. Case IDs, filenames, and
+hidden text are excluded. It estimates class probabilities; the final action is
+still selected by the expected-value rule in ``mib.policy``.
 """
 
 from __future__ import annotations
@@ -46,10 +23,8 @@ class Adjudicator:
         self.feature_names = feature_names
         self.metadata = metadata or {}
         # Weight on the model when blending with the hand-built path prior.
-        # 1.0 = model only. The two estimators fail differently -- the paths are
-        # a low-variance histogram grounded in the field manual, the model a
-        # high-variance learner that separates within a bucket -- so averaging
-        # them calibrates better than either alone.
+        # 1.0 selects the model only. Lower values retain part of the
+        # deterministic path distribution.
         self.blend_weight = blend_weight
         # sklearn orders classes_ alphabetically; map explicitly rather than
         # assuming, so a class-order change cannot silently swap outcomes.
@@ -75,7 +50,7 @@ class Adjudicator:
 
     @classmethod
     def try_load(cls, path: str | Path = MODEL_PATH) -> "Adjudicator | None":
-        """Load if present, else None -- the pipeline falls back to the paths."""
+        """Load the artifact when available; otherwise use policy paths."""
         try:
             return cls.load(path)
         except Exception:  # noqa: BLE001 - a missing/corrupt model must not crash a run

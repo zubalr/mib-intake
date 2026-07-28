@@ -1,8 +1,4 @@
-"""Tests for closed-vocabulary snapping.
-
-These pin the behaviour that matters for scoring: OCR noise must snap onto the
-right value, and genuinely unknown values must *not* be force-matched.
-"""
+"""Tests for closed-vocabulary matching."""
 
 import pytest
 

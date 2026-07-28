@@ -1,23 +1,12 @@
 """Field-level validation for extracted values and emitted rows.
 
-Two independent guards, because OCR introduced a class of failure the text-layer
-path never had:
+Validation occurs before a value becomes evidence and again before output.
+Dates and sponsor IDs must satisfy the official schema even when OCR returns
+damaged text.
 
-1. **At record time** -- reject values that cannot possibly be right for their
-   field before they ever become evidence. OCR on a damaged scan produced
-   arrival dates of ``}``, ``f``, ``2926-05-03 ke i`` and
-   ``[DATE WA._. =D OUT]``. Two of those are not merely wrong, they are
-   *structurally invalid*: `validate_submission.py` rejects any record whose
-   `arrival_date` is not a real ISO date or whose `sponsor_id` does not match
-   ``^SPN-\\d{4}$``, so a single bad OCR read could invalidate the row.
-
-2. **At output time** -- a final sweep over every emitted row, replacing
-   anything still invalid with the prior fallback. Belt and braces: the row we
-   write must satisfy the official validator no matter what the pipeline did.
-
-The damage-marker check is deliberately fuzzy. The text layer produces clean
+The damage-marker check is tolerant of OCR noise. The text layer produces clean
 ``[DATE WASHED OUT]``, but OCR of the same marker yields ``[DATE WA._. =D OUT]``
-or ``{DATE WASHED ouT}`` -- a strict uppercase-in-brackets pattern misses those
+or ``{DATE WASHED ouT}``. A strict uppercase-in-brackets pattern misses those
 and lets a marker through as if it were a value.
 """
 
@@ -50,9 +39,8 @@ def looks_damaged(value: str) -> bool:
         return True
     # An opening bracket with no closing one is a damage marker the scan cut
     # off mid-word: `[SPECIES WHITEOUT]` came back as `[SPE`, which carries no
-    # damage word and enough letters to pass every other check, so it was being
-    # recorded as if it were a species code. No real field value starts with a
-    # bracket, so this is safe to reject outright.
+    # damage word and enough letters to pass every other check. No real field
+    # value starts with a bracket, so this is safe to reject outright.
     if value[:1] in "[{(" and not any(c in value for c in "]})"):
         return True
     # A value that is mostly punctuation is OCR debris, not content.

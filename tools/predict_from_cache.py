@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""Produce predictions.jsonl from a cached extraction, without touching PDFs.
+"""Produce predictions from cached extraction without reading PDFs.
 
-Turns a ~20 minute measurement cycle into a couple of seconds, which is what
-makes decision-rule and model experiments practical at all.
-
-Deliberately reuses `mib.cli.corpus_reference_date` and `mib.pipeline.finalize`
-rather than reimplementing them, so cached scoring cannot drift from what the
-container actually does. The first thing this was used for was reproducing the
-live pipeline's score exactly -- a cached scorer that quietly disagrees with the
-shipped one is worse than no scorer.
+The cached path reuses the production reference-date and finalization functions
+to keep scoring behavior consistent with the container.
 
 Usage:
     PYTHONPATH=. python tools/predict_from_cache.py \\

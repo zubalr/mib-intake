@@ -1,4 +1,4 @@
-"""Tests for span visibility classification -- the base of the trust layer.
+"""Tests for span visibility classification.
 
 Each hiding technique named in EVALUATION.md gets a test. These are built as
 synthetic PDFs rather than fixtures so they stay meaningful if the corpus
@@ -46,8 +46,7 @@ def test_white_on_white_is_hidden(probe):
 
 
 def test_invisible_render_mode_is_hidden(probe):
-    """PDF text render mode 3. PyMuPDF reports alpha on a 0-255 scale, not 0-1 --
-    reading it as a float fraction silently classifies invisible text as visible."""
+    """PDF text render mode 3 must be classified as hidden."""
     span = _find(extract_spans(probe), "INVISIBLE")
     assert span.invisible and span.hidden
 

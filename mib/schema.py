@@ -1,13 +1,10 @@
-"""Output record shape and serialisation.
-
-The evaluator and validator are strict in ways worth encoding once, here:
+"""Output record shape and serialization.
 
   * `sponsor_id` must match ``^SPN-\\d{4}$`` and `arrival_date` must be a real
-    ISO date, or `validate_submission.py` rejects the record outright. There is
-    no "blank" escape hatch.
+    ISO date.
   * Unknown fields must still carry a plausible value. The evaluator scores a
     wrong value and a blank identically, and drops genuinely unrecoverable
-    fields from the case's denominator, so a fallback guess is free upside.
+    fields from the case denominator.
   * `confidence` must be a JSON number (not a string) in [0, 1].
 """
 
@@ -51,8 +48,7 @@ class Prediction:
     fee_status: str
     adjudication: str
     confidence: float
-    # Diagnostics -- never serialised into the submission, used by dev tooling
-    # to explain why a decision was made.
+    # Diagnostics are available to development tools but are not serialized.
     debug: dict = field(default_factory=dict)
 
     def to_row(self) -> dict:
@@ -76,13 +72,13 @@ def write_jsonl(path: str | Path, predictions: Iterable[Prediction]) -> int:
 #
 # `validate_submission.py` hard-rejects a record whose `sponsor_id` is not
 # ``SPN-\d{4}`` or whose `arrival_date` is not a real ISO date, so a blank is
-# not an option -- something well-formed has to go in the slot.
+# not an option. A well-formed placeholder is required.
 #
 # Neither is a guess at the *answer*. The sponsor id is deliberately outside the
 # range the corpus uses, so it cannot accidentally match a real sponsor and can
 # never collide with the revoked list. The date is a neutral placeholder that
 # `mib.cli` replaces at output time with the median arrival date of the corpus
-# actually being scored -- a constant here would be fitted to the era of
+# actually being scored. A constant here would be fitted to the era of
 # whatever set it was chosen on, which is exactly the kind of hidden
 # public-corpus dependency that does not survive a private test set.
 FALLBACK_SPONSOR_ID = "SPN-0000"

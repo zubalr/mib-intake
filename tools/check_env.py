@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""Assert the current environment matches requirements.txt exactly.
+"""Assert that the current environment matches requirements.txt.
 
-Why this exists as a hard check rather than a note in the README:
-
-The learned adjudicator is a **pickle**. It is written by whatever scikit-learn
-version `tools/train_adjudicator.py` runs under and read by whatever version the
-Docker image installs. Those two drifted apart without anyone noticing -- the
-model was trained on 1.9.0 while the image pinned 1.7.2 -- and the only symptom
-was an `InconsistentVersionWarning` buried in container stderr. The run still
-produced 200 well-formed predictions. Silent, plausible, wrong-in-principle
-output is the worst failure mode available to a scored submission, and it is
-undetectable from the score itself.
+The adjudicator artifact is serialized by scikit-learn, so training and runtime
+versions must match.
 
 Usage (run before `docker build`, and after any dependency change):
     PYTHONPATH=. python tools/check_env.py
@@ -54,7 +46,7 @@ def main() -> int:
     if problems:
         print("Environment does not match requirements.txt:", file=sys.stderr)
         print("\n".join(problems), file=sys.stderr)
-        print("\nThe adjudicator is a pickle -- training and runtime must agree.\n"
+        print("\nThe adjudicator is a pickle; training and runtime must agree.\n"
               "Either reinstall (`pip install -r requirements.txt`) or update the\n"
               "pins to match this environment, then RETRAIN so the artifact is\n"
               "written by the same version that will read it.", file=sys.stderr)

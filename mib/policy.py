@@ -1,23 +1,8 @@
-"""Adjudication policy: evidence -> decision path -> probabilities -> decision.
+"""Adjudication policy with separate path, calibration, and decision stages.
 
-Three deliberately separate stages, because 8090 hand-reviews submission code and
-a policy buried in nested `if`s reads as leaderboard-fitting rather than
-engineering:
-
-1. **Path assignment** (`decision_path`) -- a pure, auditable function of the
-   extracted record that names *which policy rule fires*. Every branch traces to
-   a line in `FIELD_MANUAL.md` or to a stated inference from public training
-   labels.
-2. **Calibration** -- each path maps to an empirical outcome distribution fitted
-   on the 1,000 public training rows (`policy/calibration.json`). This is where
-   "revoked sponsor, but a visible adjudicator stamp may override it" becomes a
-   75/25 split instead of a coin flip.
-3. **Decision** (`decide`) -- expected-value argmax over the evaluator's own
-   payoff matrix. No hand-tuned thresholds.
-
-Keeping these apart means the policy can be audited without reading the
-extractor, and the confidence we report is the same number that drove the
-decision -- which is what makes it calibrated rather than decorative.
+``decision_path`` maps trusted evidence to a named policy state.
+``Calibration`` maps that state to an empirical class distribution.
+``decide`` selects the expected-value maximum under the published payoff matrix.
 """
 
 from __future__ import annotations
@@ -35,7 +20,7 @@ ADJUDICATION_VALUES_SET = frozenset(OUTCOMES)
 
 # The evaluator's payoff matrix, transcribed from
 # mib-doc-challenge/scripts/evaluate.py::classification_points.
-# Rows are our prediction, columns the truth.
+# Rows are predictions and columns are ground truth.
 PAYOFF = {
     APPROVED:     {APPROVED: 8.0, DENIED: -4.0, NEEDS_REVIEW: 1.0},
     DENIED:       {APPROVED: 0.0, DENIED:  8.0, NEEDS_REVIEW: 1.0},
@@ -54,25 +39,14 @@ REVIEW_FLAGS = frozenset({
 # FIELD_MANUAL.md publishes three revoked sponsors and states plainly that
 # "other revoked sponsors may appear in examples".
 #
-# Finding the others is a real signal, but it must not be a hardcoded list.
-# Sponsor IDs are near-unique -- 864 distinct over 1,000 training packets, almost
-# all appearing once or twice -- so a revoked sponsor stands out by *frequency*,
-# and that property holds in any corpus rather than only in the public one. An
-# earlier version listed three additional IDs read off the training labels; it
-# scored the same and would have been worthless on a private set with a
-# different revoked list, besides reading exactly like leaderboard-fitting.
-#
-# `corpus_revoked_sponsors` derives them instead. Measured: it recovers the same
-# six IDs on the 1,000-packet training set and on the 5,000-packet validation
-# set, with no false positives on either, and detects nothing at all on a
-# 200-packet corpus -- degrading to "no detection" rather than to noise, which is
-# the correct failure mode.
+# Additional revoked sponsors are inferred from frequency within the corpus.
+# Sponsor IDs are normally sparse, while revoked IDs recur unusually often.
 REVOKED_SPONSORS_PUBLIC = frozenset({"SPN-0007", "SPN-0139", "SPN-4040"})
 REVOKED_SPONSORS = REVOKED_SPONSORS_PUBLIC
 
 # A sponsor appearing more than this multiple of the 99th-percentile frequency
-# is over-represented to a degree ordinary sponsors never reach. Deliberately
-# far below the observed gap (the flagged IDs sit at 6-40x p99 while the tail
+# is over-represented to a degree ordinary sponsors never reach. The threshold is
+# below the observed gap (the flagged IDs sit at 6 to 40 times p99 while the tail
 # tops out at 1x) so the exact multiple does not matter.
 REVOKED_FREQUENCY_MULTIPLE = 4
 MIN_CORPUS_FOR_FREQUENCY = 400
@@ -84,9 +58,8 @@ STALE_DAYS = 180
 
 # How far an arrival date may sit from the corpus reference before it stops
 # counting as credible evidence. Arrival dates within one corpus cluster within
-# months of each other, so a date years away is an OCR digit error -- `6` and
-# `8` collide, and "2026" reads as "2028" on 30 of 1,000 training packets --
-# rather than a genuine outlier. The window is deliberately generous so a corpus
+# months of each other, so a date years away is usually an OCR digit error.
+# The window is intentionally generous so a corpus
 # that legitimately spans a wide range is left alone.
 IMPLAUSIBLE_DATE_DAYS = 400
 
@@ -102,7 +75,7 @@ def corpus_revoked_sponsors(records) -> frozenset[str]:
 
     Returns an empty set on a corpus too small for the statistic to mean
     anything, which leaves the documented `REVOKED_SPONSORS_PUBLIC` as the only
-    source -- the right behaviour when there is no evidence.
+    source when there is insufficient evidence.
     """
     counts: dict[str, int] = {}
     for record in records:
@@ -129,20 +102,10 @@ MIN_DATED_FOR_YEAR_REPAIR = 50
 
 
 def corpus_years(records) -> dict[str, int]:
-    """Year histogram of the corpus, restricted to the run containing the mode.
+    """Return the contiguous year sequence containing the corpus mode.
 
-    This exists to repair a misread year, so it must first decide which years are
-    real. A frequency threshold cannot do that, and the reason is worth stating:
-    30 of 1,000 training packets misread 2026 as 2028, so the *wrong* year holds
-    3.3% of the corpus against a genuine 2025 at 5.3%. Any cutoff separating
-    those two is a constant fitted to this corpus -- the same correlated-OCR-error
-    trap that broke the staleness reference twice (see 4.18).
-
-    What does separate them is that arrival dates are **continuous in time**. The
-    real years form an unbroken run; the spurious 2028 sits beyond an empty 2027.
-    So take the maximal contiguous run of observed years containing the modal
-    year and treat anything past the gap as a misread. A corpus genuinely
-    spanning 2025-2030 keeps all six.
+    Arrival dates should form a contiguous sequence. A detached year beyond an
+    empty interval is treated as an OCR outlier.
     """
     counts: dict[int, int] = {}
     for record in records:
@@ -175,13 +138,8 @@ def repair_year(value: str, years: dict[str, int]) -> str | None:
     and 2025, so requiring a single candidate rejects every repair. The tie
     breaks on the corpus histogram instead, requiring the winner to dominate.
 
-    **The result is a better guess, not new evidence.** Callers print it and must
-    not promote it onto the `Record`. Measured both ways: printing it is worth
-    +0.09 extraction, while also feeding it to the policy engine gives that back
-    and more -- 11 of the 32 repairs fix the year and still have the wrong month
-    or day, and a plausible-but-wrong date can make a stale packet look fresh.
-    `MEMO.md` states the rule this is an instance of: a guess fills the output,
-    never the decision.
+    The result is an output fallback, not policy evidence. Callers must not
+    promote it onto the ``Record``.
     """
     if not years:
         return None
@@ -211,15 +169,13 @@ def apply_reference_date(record: "Record", reference: str,
     """Attach corpus-level context to a record: staleness reference, the
     corpus-derived revoked-sponsor set, and a screen on the arrival date.
 
-    Every consumer of a `Record` -- the CLI, the cached scorer, the calibration
-    fitter and the trainer -- must do this identically, or calibration is fitted
-    on different decision paths than the pipeline takes. Hence one function
-    rather than four copies of two lines.
+    Every consumer of a ``Record`` calls this function so corpus-level context
+    is applied consistently.
 
     The screen: an arrival date sitting years away from every other date in the
     corpus is a misread, not evidence. We cannot recover the true value, since
-    the failure is a single digit, but we can stop treating it as readable --
-    otherwise a bogus *future* date produces a negative staleness margin and
+    the failure is a single digit, but it should not count as readable.
+    Otherwise a future OCR date produces a negative staleness margin and
     makes a stale packet look fresh.
     """
     if record.receipt_date is None:
@@ -243,7 +199,7 @@ class Record:
 
     `unknown` marks a field with no *trusted* visible evidence. That is a
     materially different state from a field we simply guessed, and it is what
-    drives NEEDS_REVIEW -- `EVALUATION.md` explicitly rewards distinguishing
+    drives NEEDS_REVIEW. `EVALUATION.md` explicitly rewards distinguishing
     "unknown from trusted evidence" from "filled in by prompt injection".
     """
 
@@ -264,8 +220,7 @@ class Record:
     # Whether we actually READ the risk-flag evidence. An empty flag set means
     # two very different things: "the biometric slip says none" versus "the slip
     # was an image we could not read". Conflating them approves packets whose
-    # disqualifying flags we simply never saw -- it was the largest single source
-    # of catastrophic false approvals in the first end-to-end run (28 of 43).
+    # disqualifying flags are not observed.
     risk_flags_known: bool = True
     # Whether the packet contains any scanned page at all. Distinguishes "the
     # risk panel is in here somewhere and we could not read it" from "this
@@ -300,33 +255,23 @@ def _is_stale(record: Record) -> bool | None:
 def decision_path(record: Record) -> str:
     """Name the policy rule that governs this case.
 
-    **Ordered by evidential strength, not by the order FIELD_MANUAL.md lists its
-    rules.** Every path that fires on evidence we can *see* is checked before
-    any path that fires on evidence that is *missing*.
-
-    That distinction is the single most valuable structural property of this
-    function, and it was learned the hard way twice. Checking a missing-evidence
-    rule early makes it a short-circuit that swallows everything downstream: an
-    absent fee receipt alone was hiding 292 packets that carried a perfectly
-    readable disqualifying flag, revoked sponsor or stale date. A missing field
-    is the *weakest* thing a packet can tell us, so it must decide last.
+    Rules based on visible evidence are evaluated before rules based on missing
+    evidence. Missing fields therefore cannot suppress stronger signals.
     """
     flags = record.flag_set()
     visa_known = record.visa_class != UNKNOWN
 
-    # === TIER 1: present evidence, disqualifying ============================
-    # Each of these was 100% pure on the training labels.
+    # Tier 1: present disqualifying evidence.
     if record.visa_class == "TRANSIT-7":
-        # "transit only; work authorization should usually be denied" -- 53/53.
+        # Transit class cannot authorize work.
         return "transit_7"
     if flags & DISQUALIFYING_FLAGS:
-        # 186/186 DENIED.
         return "disqualifying_flag"
     if record.fee_status == "unpaid" and not record.has_hardship_waiver:
-        # 50/50 DENIED. A visible hardship waiver is the documented exception.
+        # A visible hardship waiver is the documented exception.
         return "fee_unpaid"
 
-    # === TIER 2: present evidence, adverse ==================================
+    # Tier 2: present adverse evidence.
     # DIP-1 is exempt from the sponsor requirement, so a revoked sponsor is only
     # disqualifying for other classes. An unknown visa class is not treated as
     # DIP-1 here -- that would be the exemption granting itself.
@@ -355,7 +300,7 @@ def decision_path(record: Record) -> str:
             return "stale_dip_exempt"
         return "stale_arrival"
 
-    # === TIER 3: missing evidence ===========================================
+    # Tier 3: missing evidence.
     # Nothing visible decided the case, so now the gaps get a say.
     if record.arrival_date_untrusted or record.arrival_date == UNKNOWN:
         # "If the arrival date is missing or appears only in hidden text, mark
@@ -366,7 +311,7 @@ def decision_path(record: Record) -> str:
     if record.visa_class != "DIP-1" and record.sponsor_id == UNKNOWN:
         return "sponsor_unknown"
     if not record.risk_flags_known:
-        # Never approve on unread risk evidence -- the payoff matrix charges -4
+        # Never approve on unread risk evidence. The payoff matrix charges -4
         # for approving a denial and pays 2 for routing it to review.
         #
         # Split by *why* it is unread. A packet holding a scan we failed to
@@ -380,7 +325,7 @@ def decision_path(record: Record) -> str:
     if stale is None:
         return "staleness_indeterminate"
 
-    # === TIER 4: nothing adverse found ======================================
+    # Tier 4: no adverse evidence.
     if record.injection_detected:
         # Clean on the merits, but the packet was adversarial. Held separately
         # so calibration can tell us whether that alone predicts trouble.
@@ -393,8 +338,7 @@ def decide(probs: dict[str, float]) -> tuple[str, float]:
     """Expected-value argmax over the evaluator's payoff matrix.
 
     Returns ``(adjudication, confidence)`` where confidence is P(this decision is
-    correct) -- exactly the quantity the Brier calibration term scores, so the
-    number we report is the number that drove the choice.
+    correct), the quantity used by the Brier calibration term.
     """
     best, best_ev = NEEDS_REVIEW, float("-inf")
     for candidate in OUTCOMES:
@@ -433,7 +377,7 @@ class Calibration:
 # Packets we could not read at all get their own calibration path rather than
 # falling through the normal rules. An all-unknown Record would otherwise land
 # on `fee_unknown`, whose ~94% NEEDS_REVIEW rate was measured on packets that
-# were successfully read -- wildly overconfident for a packet we know nothing
-# about. Until the corpus tells us the true outcome mix for unreadable packets,
+# were successfully read and is overconfident for a packet with no usable data.
+# Until the corpus provides an empirical outcome mix for unreadable packets,
 # this path is absent from the fitted table and resolves to the global prior.
 UNREADABLE_PATH = "unreadable_packet"

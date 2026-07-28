@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Fit calibration by running the *real* pipeline over the labelled training set.
+"""Fit calibration from extracted evidence on the labeled training set.
 
 Fitting on true field values (tools/fit_calibration.py) measures the policy
-ceiling. This measures the system we actually ship: paths are assigned from
+ceiling. This tool measures the shipped extraction path: states are assigned from
 extracted evidence, so the fitted probabilities absorb extraction error too.
-That matters because a path's reliability depends on how well we can read the
+Path reliability depends on extraction quality for the
 packets that land on it, not just on the policy rule.
 
 Two-pass by necessity: decision paths are computed first (they are a pure
@@ -48,8 +48,8 @@ def _init() -> None:
 def extract_one(pdf: str):
     """Extract one packet using the *same* code path the pipeline ships.
 
-    Rebuilding the Record here (an earlier version did) lets the fitter drift
-    from the shipped pipeline, which silently mis-calibrates every path.
+    Rebuilding the record here would allow calibration behavior to diverge from
+    the shipped pipeline.
     """
     assert _LEX is not None
     ex = extract_packet(Path(pdf), _LEX)
@@ -72,10 +72,7 @@ def main() -> None:
     with open(args.labels, newline="") as f:
         truth = {r["case_id"]: r["adjudication"].strip() for r in csv.DictReader(f)}
 
-    # The cache holds exactly what `extract_one` would recompute, so reading it
-    # is not an approximation -- it is the same extraction, already done. Fitting
-    # from PDFs spent a full extraction pass on every calibration refit, which
-    # doubled the cost of every experiment.
+    # The cache contains the same extraction result returned by `extract_one`.
     if args.cache:
         from tools.build_cache import load_cache
         rows = [r for r in load_cache(args.cache)["rows"] if not r["failed"]]

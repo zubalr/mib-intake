@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""Train the learned adjudicator and prove it beats the hand-built paths.
+"""Train and evaluate the learned adjudicator.
 
-Method, and why each piece is there:
-
-* **Out-of-fold probabilities.** Every reported number comes from
-  `cross_val_predict`, so a packet's probability is produced by a model that
-  never saw it. In-sample probabilities on 1,000 rows would look excellent and
-  mean nothing -- and because the calibration term is a Brier score, an
-  overconfident in-sample fit is actively punished on the real set.
-* **Scored with the challenge's own objective**, not accuracy or log-loss. A
-  model with better accuracy can easily score *worse* once the -4 false-approval
-  cell and the 20-point Brier term are applied, so the selection metric is the
-  actual 100-point classification+calibration total.
-* **Note cases excluded from training.** An adjudicator note settles the case by
-  rule and the model never runs on those, so training on them would fit a
-  population the model never sees.
-* **Compared head-to-head against the hand-built paths on identical folds.**
-  The model only ships if it wins out-of-fold. Otherwise the paths stay.
+Candidate models are evaluated with out-of-fold probabilities under the
+challenge classification and calibration objective. Cases settled by explicit
+adjudicator notes are excluded because they do not reach model inference. The
+deterministic path distribution remains the baseline and runtime fallback.
 
 Usage:
     PYTHONPATH=. python tools/train_adjudicator.py \\
@@ -102,7 +90,7 @@ CANDIDATES = {
     "rf": lambda: RandomForestClassifier(
         n_estimators=500, max_depth=8, min_samples_leaf=8,
         random_state=0, n_jobs=-1),
-    # Raw tree-ensemble probabilities are poorly calibrated -- averaging votes
+    # Raw tree-ensemble probabilities are poorly calibrated. Averaging votes
     # pulls them toward the middle. Uncalibrated `rf` beat the hand-built paths
     # on classification (56.63 vs 56.35) and on false approvals (15 vs 18) yet
     # lost overall purely on the Brier term (12.84 vs 13.68). Since calibration
@@ -113,12 +101,8 @@ CANDIDATES = {
         RandomForestClassifier(n_estimators=400, max_depth=8, min_samples_leaf=8,
                                random_state=0, n_jobs=-1),
         method="isotonic", cv=4),
-    # Probability-calibration wrappers came into their own once the path prior
-    # became a feature (see mib/features.py): with the prior available, an
-    # isotonic or sigmoid layer on top of a shallow booster went from the worst
-    # candidates in the sweep to the best two, 69.8 -> 73.6 and 70.1 -> 73.3 on
-    # the trainable subset. Both do their own internal CV, so wrapping them in
-    # `cross_val_predict` keeps the evaluation properly nested.
+    # Calibration wrappers perform internal cross-validation. The outer
+    # cross-validation therefore remains properly nested.
     "hgb_sigmoid": lambda: CalibratedClassifierCV(
         HistGradientBoostingClassifier(max_depth=3, max_iter=220,
                                        learning_rate=0.06, min_samples_leaf=25,
@@ -150,7 +134,7 @@ def main() -> None:
                          "across repeats plus its standard error, so it stops "
                          "chasing the noise of one particular split.")
     ap.add_argument("--oof-out", type=Path, default=None,
-                    help="Write an honest predictions.jsonl built from "
+                    help="Write predictions.jsonl built from "
                          "out-of-fold probabilities, for official scoring.")
     args = ap.parse_args()
 
@@ -196,16 +180,8 @@ def main() -> None:
 
     # -- Repeated cross-validation ----------------------------------------
     #
-    # A single 5-fold split is not enough to *choose* between candidates, only
-    # to estimate one. Run 14 made that concrete: the winning blend weight
-    # flipped 0.50 -> 0.65 between two runs whose extraction differed by a third
-    # of a point, and the top five weights sat within 0.7 points of each other.
-    # Taking the argmax over near-tied candidates fits the selection to the
-    # particular fold assignment, which is a real way to overfit even when every
-    # individual estimate is honest.
-    #
-    # So each candidate is evaluated on `--repeats` independent fold
-    # assignments, and selection uses the mean with its standard error.
+    # Each candidate is evaluated across independent fold assignments.
+    # Selection uses the mean and its standard error to reduce split sensitivity.
     classes = list(np.unique(y))
     path_probs = np.array([[Calibration().probs(decision_path(r))[o] for o in OUTCOMES]
                            for r in records])
@@ -245,13 +221,7 @@ def main() -> None:
 
     # -- Blend the best model with the hand-built path probabilities -------
     #
-    # These are two genuinely different estimators: the paths are a low-variance
-    # 16-bucket histogram grounded in the field manual, the model is a
-    # high-variance learner that separates *within* those buckets. Averaging two
-    # such sources usually calibrates better than either alone, and it directly
-    # attacks the failure mode seen here -- rf_isotonic bought +0.94 points but
-    # took catastrophic false approvals from 18 to 33, because it is confident
-    # in the APPROVED direction exactly where the paths are cautious.
+    # Blend the learned distribution with the lower-variance policy prior.
     top = max(results, key=lambda k: results[k]["mean"])
 
     print()
@@ -271,14 +241,8 @@ def main() -> None:
 
     # -- Selection: one-standard-error rule --------------------------------
     #
-    # Take the best mean, then accept any candidate within one standard error of
-    # it and pick the most *conservative* of those. Conservative here means
-    # closest to the hand-built paths -- lowest blend weight, and a blend ahead
-    # of a bare model. That tiebreak is not arbitrary: the paths are grounded in
-    # FIELD_MANUAL.md and are a low-variance estimator, so where the evidence
-    # cannot distinguish two candidates, the one leaning on documented policy is
-    # the one more likely to survive a private set drawn from a different
-    # generator run. Train score is not the objective; generalization is.
+    # Among statistically similar candidates, prefer the lower model weight.
+    # This retains more of the policy prior and reduces variance.
     peak = max(results, key=lambda k: results[k]["mean"])
     threshold = results[peak]["mean"] - results[peak]["se"]
     within = [k for k in results if results[k]["mean"] >= threshold]
@@ -337,13 +301,7 @@ def main() -> None:
 
 def _write_oof_predictions(args, cache, rows, trainable, best_name,
                            feature_names, X, y, cv, blend_weight=1.0) -> None:
-    """Write predictions using out-of-fold probabilities.
-
-    Scoring the refit model on its own training data overstates the result --
-    the first such run read 118.34 where the honest number is lower. This
-    rebuilds the same submission using only probabilities from models that never
-    saw the packet, so `scripts/evaluate.py` reports something believable.
-    """
+    """Write predictions using out-of-fold probabilities."""
     import json
     from mib.cli import (_enforce_output_schema, corpus_median_date,
                          corpus_reference_date, fallback_prediction)
@@ -369,8 +327,7 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
     reference = corpus_reference_date([r["record"] for r in good])
     # The CLI settles the printed date against corpus-level context; the
     # out-of-fold writer must do the same or it scores a system that does not
-    # ship. It was previously omitted here -- worth only ~0.02 points, but the
-    # divergence is the shape of failure this project keeps paying for.
+    # ship.
     median_date = corpus_median_date([r["record"] for r in good])
     years = corpus_years([r["record"] for r in good])
 

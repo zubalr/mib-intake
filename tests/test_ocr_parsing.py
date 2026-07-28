@@ -1,10 +1,4 @@
-"""Regression tests for OCR text interpretation.
-
-These encode adversarial behaviour the corpus actually contains, so they are
-worth more than their line count: each one failed at some point during
-development, and several protect against a change that would silently *raise*
-the train score while making the system wrong.
-"""
+"""Regression tests for OCR text interpretation."""
 
 from mib import pipeline, policy
 from mib.ocr import mine_literals, parse_fields
@@ -33,13 +27,7 @@ class TestNoteFinding:
         assert parse_fields("SAMPLE DENIAL")[2].get("note_finding") is None
 
     def test_a_watermark_does_not_veto_a_real_labelled_finding(self):
-        # This assertion used to be the opposite, under a page-wide
-        # `"SAMPLE" not in text` guard. Measured on the corpus: pages carrying
-        # *both* a SAMPLE watermark and a `Finding:` label agree with the truth
-        # 3/3, with no disagreements -- genuine adjudicator notes routinely also
-        # carry the harmless watermark, so the page-wide guard was discarding
-        # real findings to protect against a watermark somewhere else entirely.
-        # The label is the guard: `SAMPLE` itself fails `_is_finding_label`.
+        # The label is the guard. `SAMPLE` itself is not a finding label.
         assert parse_fields("SAMPLE DENIAL\nFinding DENIED")[2].get(
             "note_finding") == "DENIED"
 
@@ -138,8 +126,7 @@ def _dated(arrival):
     return policy.Record(case_id="X", arrival_date=arrival)
 
 
-# A corpus whose real years are 2025 and 2026, plus the misread cluster the
-# training set actually contains: 30 packets reading 2028 for 2026.
+# A corpus with contiguous valid years and a detached OCR-error cluster.
 _CORPUS = [*[_dated("2026-06-01") for _ in range(80)],
            *[_dated("2025-11-02") for _ in range(20)],
            *[_dated("2028-04-18") for _ in range(30)]]
@@ -148,9 +135,7 @@ _CORPUS = [*[_dated("2026-06-01") for _ in range(80)],
 class TestArrivalYearRepair:
     """A misread year is repairable; the repair must never become evidence."""
 
-    def test_run_stops_at_the_gap(self):
-        # 2028 holds 3.3% of the corpus and 2025 holds 5.3%, so no frequency
-        # cutoff separates them. An empty 2027 does.
+    def test_contiguous_years_stop_at_the_gap(self):
         assert set(policy.corpus_years(_CORPUS)) == {"2025", "2026"}
 
     def test_repairs_the_dominant_candidate(self):
@@ -187,10 +172,7 @@ class TestArrivalYearRepair:
         pipeline.resolve_printed_date(printed, record, "2026-06-01",
                                       policy.corpus_years(_CORPUS))
         assert printed["arrival_date"] == "2026-04-18"
-        # The Record the policy engine reads is untouched. 11 of the 32 repairs
-        # fix the year and still carry a wrong month or day, and a
-        # plausible-but-wrong date can make a stale packet look fresh: promoting
-        # the repair measured -0.08 classification against +0.09 extraction.
+        # The record used by policy remains unchanged.
         assert record.arrival_date == "2028-04-18"
 
     def test_unknown_date_still_prints_the_corpus_median(self):
@@ -204,19 +186,19 @@ class TestReasonScoping:
     """A rationale that is a whole sentence identifies its own page."""
 
     def test_intact_rationale_survives_destroyed_scope_cues(self):
-        # MIB-000333, verbatim: the rationale is clean while `Adjudicator`,
-        # `Manual` and `Reason` are each damaged past recognition.
+        # The rationale remains readable while the page labels are damaged.
         text = ("Manu... . _judicator Note Feria g2280NFn_ | Reascr, "
                 "Clean or exception-qualifled packet.")
         assert parse_fields(text)[2].get("note_finding") == "APPROVED"
 
     def test_debris_inside_the_phrase(self):
-        # MIB-000357: OCR wedged a pipe and a space into "exception".
-        text = "| Manual Adjudicator Note nding: APPRO' eason: Clean or exce| tion-qualified packet."
+        # OCR may insert debris inside a rationale phrase.
+        text = ("| Manual Adjudicator Note nding: APPRO' eason: "
+                "Clean or exce| tion-qualified packet.")
         assert parse_fields(text)[2].get("note_finding") == "APPROVED"
 
     def test_rationale_with_no_note_furniture_at_all(self):
-        # MIB-000748: no title, no `Reason:` label, just the rationale.
+        # A complete rationale can survive without page furniture.
         text = "DENED Denial supported by damaged MD elton ot yy salle policy notes,"
         assert parse_fields(text)[2].get("note_finding") == "DENIED"
 
@@ -254,8 +236,7 @@ class TestAbbreviatedLabels:
         assert parse_fields("Home World: Luyten-b")[0].get("home_world") == "Luyten-b"
 
     def test_free_text_fields_did_not_get_short_labels(self):
-        # Deliberately NOT aliased: nothing rejects a plausible-looking string
-        # for these, so a short label breaks far more than it fixes.
+        # Free-text fields do not use ambiguous short aliases.
         for line, field in (("Sponsor: SPN-1234", "sponsor_id"),
                             ("Fee: paid", "fee_status"),
                             ("Arrival: 2026-05-01", "arrival_date")):

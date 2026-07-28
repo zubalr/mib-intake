@@ -1,23 +1,8 @@
-"""Document features for the learned adjudicator.
+"""Document-evidence features for the learned adjudicator.
 
-The hand-built decision paths are a 16-bucket histogram: every packet landing on
-`risk_page_unreadable` gets the same probability vector, even though the packets
-inside that bucket differ in ways that predict the outcome (how many fields we
-recovered, whether the biometric confidence was low, how damaged the packet is,
-how close to stale the arrival date is). Roughly 208 decidable cases were being
-hedged to NEEDS_REVIEW because a bucket average sat near the decision boundary.
-
-These features let a small model separate within a bucket. Design constraints:
-
-  * **Nothing packet-identifying.** No case_id, no filename, no page hashes.
-    8090 hand-reviews for leaderboard-fitting, and a model that can memorise a
-    packet is indefensible even if it scores well. Every feature here is a
-    property of the *evidence*, and would mean the same thing on a private test
-    packet drawn from a different generator run.
-  * **Few and dense.** 1,000 training rows is not much; each feature must earn
-    its place or it becomes a way to overfit.
-  * **The decision-path label is itself a feature**, so the model starts from
-    everything the hand-built policy knows and only has to improve on it.
+Features describe extraction coverage, provenance, document condition, policy
+state, and OCR quality. Packet identifiers, filenames, and content hashes are
+excluded.
 """
 
 from __future__ import annotations
@@ -67,17 +52,9 @@ FEE_STATES = ("paid", "waived", "unpaid", "unknown")
 def refresh_temporal(features: dict[str, float], record: Record) -> dict[str, float]:
     """Recompute every feature that depends on corpus-level context.
 
-    Named for the staleness reference it originally handled; it now also covers
-    the corpus-derived revoked-sponsor set, which is discovered in the same
-    phase and has the same failure mode if left stale.
-
-    Features are built in phase 1, per packet, but the staleness reference date
-    is a *corpus-level* statistic only known in phase 2. Without this refresh,
-    `stale_margin_known` was 0 for all 1,000 training packets -- the feature was
-    dead -- and `path__*` recorded a path computed with `receipt_date=None`,
-    which is a different (and wrong) branch than the pipeline actually takes.
-    A model trained on those features was learning from a system that does not
-    exist.
+    Per-packet features are created before corpus-level dates and sponsor
+    frequencies are known. This function updates every dependent feature after
+    that context has been computed.
 
     Mutates and returns `features` so callers can use it inline.
     """
@@ -86,27 +63,12 @@ def refresh_temporal(features: dict[str, float], record: Record) -> dict[str, fl
         del features[key]
     features["path__" + path] = 1.0
 
-    # The hand-built path prior, handed to the model as three numbers.
-    #
-    # The path one-hot already tells the model *which* rule fired, but not what
-    # that rule believes -- the learner has to rediscover each path's outcome
-    # distribution from the handful of training rows that land on it. Giving it
-    # the fitted probabilities directly turns the task from "learn the prior"
-    # into "correct the prior", which is both easier and the thing we actually
-    # want. Measured on the 662-packet trainable subset, 5 folds x 5 repeats:
-    #
-    #     hgb_isotonic  69.84 -> 73.56      hgb_tiny  69.01 -> 72.94
-    #     hgb_sigmoid   70.10 -> 73.30      rf        70.40 -> 71.94
-    #
-    # It is corpus-derived, not label-derived: `calibration.json` is refitted
-    # from whatever corpus is being scored, and a path absent from the table
-    # falls back to the global prior.
+    # Include the calibrated policy distribution as a compact prior.
     probs = _prior().probs(path)
     for outcome in OUTCOMES:
         features["prior_" + outcome] = float(probs.get(outcome, 0.0))
 
-    # Revocation is now discovered from the corpus, so this cannot be computed
-    # in phase 1 -- exactly like the staleness features below.
+    # Sponsor-frequency context is available only after phase 1.
     features["sponsor_revoked"] = float(record.sponsor_id in REVOKED_SPONSORS_PUBLIC
                                         or record.sponsor_revoked_in_packet)
 
@@ -129,10 +91,10 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
     flags = record.flag_set()
     feats: dict[str, float] = {}
 
-    # -- What the policy engine already concluded --------------------------
+    # Policy state.
     feats["path__" + decision_path(record)] = 1.0
 
-    # -- Evidence coverage: which fields did we actually recover? ----------
+    # Evidence coverage.
     known = 0
     for field in SCORED_FIELDS:
         have = bool(ev.best(field) and ev.best(field).trusted)
@@ -142,7 +104,7 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
     feats["known_field_frac"] = known / len(SCORED_FIELDS)
     feats["fee_known"] = float(record.fee_status != UNKNOWN)
 
-    # -- Corroboration: how many independent sources agree on a field? -----
+    # Corroboration across independent sources.
     total_obs = agree = conflict = 0
     for field in SCORED_FIELDS:
         values = {o.value.casefold() for o in ev.values(field) if o.trusted}
@@ -155,7 +117,7 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
     feats["fields_corroborated"] = float(agree)
     feats["fields_conflicting"] = float(conflict)
 
-    # -- Risk flags --------------------------------------------------------
+    # Risk flags.
     feats["n_flags"] = float(len(flags))
     feats["has_disqualifying"] = float(bool(flags & DISQUALIFYING_FLAGS))
     feats["n_review_flags"] = float(len(flags & REVIEW_FLAGS))
@@ -169,14 +131,14 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
         ev.biometric_confidence if ev.biometric_confidence is not None else -1.0)
     feats["biometric_confidence_known"] = float(ev.biometric_confidence is not None)
 
-    # -- Categorical fields, one-hot --------------------------------------
+    # Categorical fields.
     for visa in VISA_CLASSES:
         feats[f"visa_{visa}"] = float(record.visa_class == visa)
     feats["visa_unknown"] = float(record.visa_class == UNKNOWN)
     for state in FEE_STATES:
         feats[f"fee_{state}"] = float(record.fee_status == state)
 
-    # -- Sponsor -----------------------------------------------------------
+    # Sponsor evidence.
     feats["sponsor_known"] = float(record.sponsor_id != UNKNOWN)
     # Placeholder: recomputed by `refresh_temporal` once the corpus-derived
     # revoked set exists. Phase 1 cannot know it.

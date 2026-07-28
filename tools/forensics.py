@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""Characterise the PDF corpus before writing any extraction code.
+"""Report document structure, visibility, and OCR requirements for a PDF corpus.
 
-The whole architecture hinges on questions this answers:
-
-  * What fraction of packets carry a usable text layer vs. need OCR? (drives the
-    6 s/PDF budget)
-  * How is hidden/adversarial text encoded -- invisible render mode, white fill,
-    or geometry outside the visible crop? (drives the trust layer)
-  * Are stamps, waivers and diplomatic notes text, vector art, or raster?
-  * Where does the packet *receipt* date live? (needed for the staleness rule --
-    the labels expose arrival_date but never receipt date)
-  * How do multi-applicant packets mark the active case_id?
-  * Does a packet carry a registry extract stating sponsor revocation status? If
-    so we can read revocation from the document instead of relying on the
-    six-ID list inferred from label frequencies.
-
-Span visibility classification is delegated to `mib.pdfio`, which is unit-tested
-against synthetic PDFs carrying each hiding technique. Duplicating that logic
-here is how the first draft ended up with two silent bugs.
-
-Dev-time only; nothing here ships in the image.
+This development tool reuses the production visibility classifier and does not
+ship in the runtime image.
 
 Usage:
     PYTHONPATH=. python tools/forensics.py \
@@ -154,9 +137,16 @@ def main() -> None:
     print(f"packets with annotations: {sum(1 for r in ok if r['annotations'] > 0)}/{len(ok)}")
     print(f"packets with vector art:  {sum(1 for r in ok if r['vector_drawings'] > 0)}/{len(ok)}")
 
-    print(f"\nfield cues (visible):     {Counter(c for r in ok for c in r['field_cues']).most_common()}")
-    print(f"injection cues (hidden):  {Counter(c for r in ok for c in r['injection_cues_hidden']).most_common()}")
-    print(f"injection cues (visible): {Counter(c for r in ok for c in r['injection_cues_visible']).most_common()}")
+    visible_fields = Counter(c for r in ok for c in r["field_cues"]).most_common()
+    hidden_injections = Counter(
+        c for r in ok for c in r["injection_cues_hidden"]
+    ).most_common()
+    visible_injections = Counter(
+        c for r in ok for c in r["injection_cues_visible"]
+    ).most_common()
+    print(f"\nfield cues (visible):     {visible_fields}")
+    print(f"injection cues (hidden):  {hidden_injections}")
+    print(f"injection cues (visible): {visible_injections}")
 
     n_multi_case = sum(1 for r in ok if len(r["visible_case_ids"]) > 1)
     print(f"\npackets naming >1 case id visibly: {n_multi_case}/{len(ok)}")
@@ -171,7 +161,9 @@ def main() -> None:
     shown = 0
     for r in ok:
         for s in r["hidden_samples"]:
-            print(f"  [{r['case_id']} p{s['page']}] {'+'.join(s['reasons'])} :: {s['text'][:110]!r}")
+            reasons = "+".join(s["reasons"])
+            print(f"  [{r['case_id']} p{s['page']}] "
+                  f"{reasons} :: {s['text'][:110]!r}")
             shown += 1
             if shown >= 20:
                 break

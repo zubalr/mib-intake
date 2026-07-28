@@ -1,9 +1,9 @@
-# Submission — zubalr
+# Submission: zubalr
 
 **Solution repository:** https://github.com/zubalr/mib-intake
 
-Public, Dockerfile-based. The image entrypoint accepts exactly
-`<input_pdf_dir> <output_predictions_path>` and runs fully offline.
+The repository contains a Docker-based, fully offline solution. Its entrypoint
+accepts an input PDF directory and an output JSONL path:
 
 ```bash
 docker build -t mib-intake .
@@ -11,39 +11,38 @@ docker build -t mib-intake .
 
 ```bash
 docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
-  -v /path/to/pdfs:/input:ro -v /path/to/out:/output \
+  -v /path/to/pdfs:/input:ro \
+  -v /path/to/output:/output \
   mib-intake /input /output/predictions.jsonl
 ```
 
-## Contents
+## Public-data estimate
 
-| File | What it is |
-| --- | --- |
-| `predictions.jsonl` | Validation-set predictions (5,000 rows) |
-| `MEMO.md` | Technical memo |
-| `SUBMISSION.md` | This file |
+| Section | Score |
+| --- | ---: |
+| Extraction | 44.01 / 50 |
+| Classification | 67.09 / 80 |
+| Calibration | 16.27 / 20 |
+| Total | **127.38 ± 0.08 / 150** |
+| Mean confidence Brier | 0.0931 |
 
-## Summary
+All reported score estimates are out of fold.
 
-| | |
-| --- | --- |
-| Out-of-fold score on train | **126.00 ± 0.10 / 150** |
-| Extraction / classification / calibration | 43.73 / 66.20 / 16.07 |
-| Mean Brier | 0.098 |
-| Catastrophic false approvals | 18 / 1,000 |
-| Runtime | 1.62 s/PDF in-container (budget 6 s) |
-| Image size | 1.19 GB (limit 4 GiB) |
-| Model artifact | 112 KB (limit 250 MiB) |
+## Approach
 
-Approach: trust-ranked evidence extraction implementing `FIELD_MANUAL.md`
-precedence, closed-vocabulary snapping with OCR-aware edit distance, structural
-quarantine of hidden and non-evidentiary text, and an expected-value decision
-rule over the evaluator's own payoff matrix. Probabilities come from a blend of
-hand-built decision paths and a shallow histogram gradient-boosting classifier
-trained only on evidence features — no `case_id`, filename, or packet-identifying input.
+The solution combines:
 
-No LLMs, VLMs, or cloud OCR anywhere in the runtime: Tesseract, PyMuPDF and
-scikit-learn only.
+- trust-ranked evidence extraction based on the field manual;
+- local Tesseract OCR for scanned pages;
+- OCR-aware matching for closed-vocabulary fields;
+- structural quarantine of hidden and non-evidentiary text;
+- deterministic rules for high-confidence policy evidence;
+- a compact calibrated classifier for unresolved cases; and
+- expected-value adjudication using the published payoff matrix.
 
-See `MEMO.md` for the reasoning, and `WORKLOG.md` in the solution repository for
-the full run-by-run history including regressions and negative results.
+The classifier uses document-evidence features only. It does not receive case
+IDs, filenames, hidden answer content, or packet-identifying inputs.
+
+No LLM, VLM, cloud OCR service, network request, or API key is used.
+
+See `MEMO.md` for technical details and reproducibility notes.

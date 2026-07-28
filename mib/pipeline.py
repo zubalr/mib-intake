@@ -1,4 +1,4 @@
-"""Per-packet pipeline: evidence -> trust resolution -> record -> prediction.
+"""Per-packet pipeline from evidence to prediction.
 
 The resolution order is the `FIELD_MANUAL.md` precedence, implemented once in
 `mib.extract` as a numeric trust rank. This module turns the ranked observations
@@ -7,16 +7,13 @@ into a single value per field, decides what is genuinely *unknown*, and hands a
 
 The distinction that earns points is between:
 
-  * **known** -- a trusted visible observation exists;
-  * **unknown** -- no trusted evidence (damaged, missing, or present only in
+  * known: a trusted visible observation exists;
+  * unknown: no trusted evidence (damaged, missing, or present only in
     hidden text). This is what drives NEEDS_REVIEW;
-  * **printed** -- what we emit for an unknown field.
+  * printed: the schema-valid value emitted for an unknown field.
 
-The last is free upside: the evaluator scores a wrong value exactly like a blank
-and drops genuinely unrecoverable fields from the denominator, so we always emit
-the training-prior mode rather than leaving a field empty. Crucially the guess
-never feeds the policy engine -- adjudicating on a guess is how a system talks
-itself into approving a packet it could not read.
+Printed defaults are kept separate from policy evidence. A value emitted for
+schema completeness cannot justify an adjudication.
 """
 
 from __future__ import annotations
@@ -51,9 +48,7 @@ from mib.schema import FALLBACK_ARRIVAL_DATE, FALLBACK_SPONSOR_ID, Prediction
 # Fields snapped onto a closed vocabulary.
 SNAP_FIELDS = ("species_code", "home_world", "visa_class", "declared_purpose")
 
-# An adjudicator note states the finding outright and matched ground truth on
-# 162/162 training packets. FIELD_MANUAL.md ranks a signed manual note as the
-# top evidence tier, so trusting it is policy-consistent, not a shortcut.
+# The field manual gives an explicit adjudicator finding the highest trust rank.
 ADJUDICATOR_NOTE_PATH = "adjudicator_note_finding"
 
 FEE_VALUES = {"paid", "waived", "unpaid", "unknown"}
@@ -68,12 +63,9 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def _candidate_score(field: str, value: str, lexicon: Lexicon) -> float:
     """How much a candidate value looks like a real value for its field.
 
-    Only used to break ties *within* one trust tier. Multi-variant OCR now
-    yields several readings of the same scan -- ``Woll-108 fc`` and
-    ``Wolf-1061c`` for the same line -- and taking whichever ran first is
-    arbitrary. Snap confidence is the honest arbiter: it is the same measure the
-    printer already trusts to correct OCR noise, so a candidate that snaps
-    cleanly is, by construction, the one we would have printed anyway.
+    Used only to break ties within one trust tier. Closed-vocabulary snap
+    confidence resolves competing OCR readings consistently with output
+    normalization.
     """
     value = value.strip()
     if not value:
@@ -145,16 +137,8 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
             and ev.sponsor_letter_sponsor != form_sponsor:
         flags.add("sponsor_mismatch")
 
-    # ...or naming a different *applicant* than the identity documents.
-    #
-    # This started as an exclusion: the sponsor letter was feeding
-    # `identity_conflict`, which was wrong on all 13 training packets where it
-    # fired. But simply dropping it measured -0.16 classification, because the
-    # flag was the wrong *token* while still being a useful *signal* -- removing
-    # it moved packets off `review_flags` and toward APPROVED. Emitting the token
-    # the truth actually uses keeps the signal and fixes the label: both are
-    # review-only flags, so the decision path is unchanged, and 6 of those 13
-    # packets go from certainly-wrong to correct.
+    # A sponsor letter naming a different applicant is sponsor evidence, not an
+    # identity-document conflict.
     if ev.sponsor_letter_name:
         letter_name, letter_conf = lexicon.snap_name(ev.sponsor_letter_name)
         identity = set()
@@ -167,24 +151,8 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
         if letter_conf > 0.0 and identity and letter_name.casefold() not in identity:
             flags.add("sponsor_mismatch")
 
-    # Two documents naming different applicants.
-    #
-    # Deliberately conservative, and only over crisp text-layer sources. OCR of
-    # a scan renders the same name as "Veetari Tekmora" and "Vestan Tekmors",
-    # or appends page furniture ("Solix Solquell SCAN IMAGE") -- comparing those
-    # produced ~141 false identity conflicts, which cost extraction points and
-    # wrongly forced packets to NEEDS_REVIEW. A manual correction also *resolves*
-    # a conflict rather than being one, so its presence suppresses the flag.
-    # The sponsor letter is excluded too, and that is a substantive rule rather
-    # than more noise-suppression. A sponsor letter naming somebody other than
-    # the applicant is a *sponsor* problem, not two identity documents
-    # disagreeing: on all 13 training packets where it happened, every identity
-    # document agreed with itself and the truth was `sponsor_mismatch` or no flag
-    # at all -- never `identity_conflict`. Excluding it moves precision from
-    # 0.529 to 0.667.
-    #
-    # (The obvious follow-on -- treating a differing letter name as evidence of
-    # `sponsor_mismatch` -- was measured at 46% precision and rejected.)
+    # Identity conflict requires disagreement between crisp identity sources.
+    # OCR scans, sponsor letters, and corrections are excluded from this test.
     if "applicant_name" not in ev.corrections:
         crisp = set()
         for obs in ev.values("applicant_name"):
@@ -273,37 +241,18 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
         if candidate in FEE_VALUES:
             fee = candidate
 
-    # `fee_status` was the one field still *printing* its unknown marker instead
-    # of a prior guess, and it cost more than any other single oversight.
-    # "unknown" is a legal value, which is what disguised the bug: the output
-    # looked deliberate. But it is only 4.4% of the truth distribution, while we
-    # were printing it on 41.7% of packets. Among those 417, the truth is 65%
-    # `paid` and only 9.8% `unknown` -- so printing the prior mode wins 271 and
-    # loses 41, worth about +1.0 extraction points.
-    #
-    # The *record* keeps UNKNOWN, so the `fee_unknown` decision path still fires
-    # and the policy engine never sees the guess. This is the same split §1.2
-    # already applies to every other field: a wrong value and a blank score
-    # identically, so a guess on an unreadable field is free, but adjudicating
-    # on that guess is not.
+    # The record keeps UNKNOWN so the printed fallback cannot influence policy.
     printed["fee_status"] = fee if fee != UNKNOWN else lexicon.prior_mode("fee_status")
 
     flags = _derive_risk_flags(ev, lexicon)
     printed["risk_flags"] = "|".join(sorted(flags)) if flags else "none"
 
     # "No flags found" is only meaningful if we actually read the page that
-    # carries them -- the biometric slip, or an adjudicator note that states the
+    # carries them: the biometric slip or an adjudicator note that states the
     # governing flag.
     #
-    # A registry extract used to count here, and that was wrong: the registry
-    # reports embargo status only, so a clean registry says nothing about
-    # biohazard, active warrants or memory tampering. It was silently marking
-    # flags "known" on 14 of the 21 remaining false approvals -- packets that
-    # carried no risk page whatsoever.
-    # `ev.risk_panel_read` covers the scanned case: a biometric slip that
-    # exists only as a raster is typed SCANNED, never BIOMETRIC, so a packet
-    # whose risk panel OCR'd cleanly as "Observed flags: none" was being treated
-    # as though its risk page had never been seen.
+    # A registry extract covers embargo status only and does not establish that
+    # the complete risk panel was read.
     flags_known = (bool(flags)
                    or BIOMETRIC in ev.page_types
                    or ev.risk_panel_read
@@ -338,21 +287,15 @@ def resolve_printed_date(printed: dict[str, str], record: Record,
                          years: dict[str, int] | None = None) -> None:
     """Settle the *printed* arrival date using corpus-level context.
 
-    Two corrections, both of which improve the emitted value without touching the
-    `Record` the policy engine reads:
+    Two output-only corrections are applied without changing the policy record:
 
-      * no date was recovered at all -> print the corpus median, since a blank
-        and a wrong value score the same and the median has the base rate;
-      * a date was recovered but its year is a misread -> print the repaired
+      * when no date is recovered, print the corpus median;
+      * when the year is an OCR error, print the repaired
         year (`repair_year`).
 
-    Neither is promoted to evidence. That separation is the whole point and it is
-    measured: promoting the repair costs more classification than the repair wins
-    in extraction.
+    Neither value is promoted to policy evidence.
 
-    Phase 2 lives in three places -- the CLI, the cached scorer and the trainer's
-    out-of-fold writer -- and they must agree exactly or calibration is fitted
-    against a system that does not ship. Hence one function.
+    The CLI, cached scorer, and out-of-fold writer all call this function.
     """
     if record.arrival_date == UNKNOWN:
         if median_date:
@@ -368,14 +311,12 @@ def finalize(printed: dict[str, str], record: Record, note: str | None,
              features: dict[str, float] | None = None) -> Prediction:
     """Phase 2: adjudicate an already-extracted record. Microseconds, no I/O.
 
-    `adjudicator` is the optional learned model. It only ever runs on cases the
-    hard rules do not already settle -- an adjudicator note states the finding
-    outright and was 217/217 correct, so no model gets to overrule it.
+    ``adjudicator`` is optional and runs only when deterministic evidence does
+    not settle the case.
     """
     if note is not None:
         adjudication = note
-        # The note dictates the decision, so the meaningful confidence is how
-        # often notes are right -- not an outcome distribution over paths.
+        # Note confidence is the fitted accuracy of explicit note findings.
         confidence = calibration.accuracy(ADJUDICATOR_NOTE_PATH, 0.95)
         path = ADJUDICATOR_NOTE_PATH
     elif adjudicator is not None and features is not None:

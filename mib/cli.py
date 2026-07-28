@@ -1,20 +1,17 @@
-"""Entrypoint: read a directory of PDF packets, write predictions.
+"""Read a directory of PDF packets and write predictions.
 
 Contract (DOCKER_SUBMISSION.md): exactly two arguments, `<input_pdf_dir>` and
 `<output_predictions_path>`. Runs offline, read-only root filesystem, scratch in
 /tmp, 4 vCPU / 8 GiB, averaging 6 seconds per PDF.
 
-Two invariants this module exists to guarantee, both worth more than any
-extraction cleverness (see WORKLOG §1.1 and §1.2):
+The entrypoint enforces two output invariants:
 
-  * **Every input PDF produces exactly one output row.** A crash, a timeout, or
+  * Every input PDF produces exactly one output row. A crash, timeout, or
     an unparseable file falls back to a prior-based record rather than dropping
-    the case. The evaluator charges a missing case its full classification and
-    extraction denominator while the advertised "missing-case penalty" is a
-    rounding error -- omitting is never correct.
-  * **No field is ever blank.** `validate_submission.py` rejects records whose
+    the case.
+  * No field is blank. `validate_submission.py` rejects records whose
     `sponsor_id` or `arrival_date` are malformed, and the evaluator scores a
-    wrong value identically to a blank, so a prior-mode guess is free upside.
+    wrong value identically to a blank.
 """
 
 from __future__ import annotations
@@ -32,8 +29,8 @@ from mib.policy import (UNREADABLE_PATH, Calibration, apply_reference_date,
                         corpus_revoked_sponsors, corpus_years, decide)
 from mib.schema import FALLBACK_ARRIVAL_DATE, FALLBACK_SPONSOR_ID, Prediction, write_jsonl
 
-# Per-PDF wall-clock ceiling. The budget is 6 s/PDF *averaged* over the set, so
-# a single pathological packet may overrun -- but it must not stall the run.
+# Per-PDF wall-clock ceiling. The budget is averaged over the set, so an
+# individual packet may exceed six seconds without stalling the batch.
 # On timeout we emit the best record built so far rather than dropping the case.
 PER_PDF_TIMEOUT_S = 55
 
@@ -47,25 +44,21 @@ def _worker_init() -> None:
     global _LEXICON, _CALIBRATION, _ADJUDICATOR
     _LEXICON = Lexicon()
     _CALIBRATION = Calibration()
-    # Optional. If the artifact is missing or unreadable the run still completes
-    # on the hand-built paths rather than failing -- a model is an optimisation,
-    # not a dependency.
+    # The deterministic paths remain available if the model cannot be loaded.
     from mib.model import Adjudicator
     _ADJUDICATOR = Adjudicator.try_load()
 
 
 def fallback_prediction(case_id: str, lexicon: Lexicon, calibration: Calibration,
                         reason: str) -> Prediction:
-    """A never-blank record for a packet we could not read at all.
+    """Return a schema-valid record for an unreadable packet.
 
     Every field takes its training-prior mode.
 
-    The adjudication deliberately does *not* run the normal policy path. An
+    Adjudication does not use the normal policy path. An
     all-unknown Record lands on `fee_unknown`, whose 94% NEEDS_REVIEW rate was
-    measured on packets we successfully read and whose fee genuinely was
-    unknown. Reporting 0.94 here would be badly overconfident: we know nothing
-    about this packet, so the honest probability is the unreadable-packet prior.
-    Overconfidence on damaged packets is exactly what the Brier term punishes.
+    estimated from otherwise readable packets. An unreadable packet instead
+    uses the dedicated unreadable-packet distribution.
     """
     adjudication, confidence = decide(calibration.probs(UNREADABLE_PATH))
     path = UNREADABLE_PATH
@@ -79,10 +72,7 @@ def fallback_prediction(case_id: str, lexicon: Lexicon, calibration: Calibration
         arrival_date=FALLBACK_ARRIVAL_DATE,
         declared_purpose=lexicon.prior_mode("declared_purpose"),
         risk_flags="none",
-        # Prior mode like every other field here. The *adjudication* stays
-        # honest (it uses the unreadable-packet prior, below) -- only the
-        # printed field guesses, and a guess on a field we could not read is
-        # free under the evaluator's scoring.
+        # Printed defaults do not enter adjudication.
         fee_status=lexicon.prior_mode("fee_status"),
         adjudication=adjudication,
         confidence=confidence,
@@ -106,7 +96,7 @@ def process_one(pdf_path_str: str) -> dict:
         ex = extract_packet(pdf_path, _LEXICON)
         return {"case_id": case_id, "printed": ex.printed, "record": ex.record,
                 "note": ex.note, "features": ex.features, "failed": False}
-    except BaseException as exc:  # noqa: BLE001 -- a dropped case is never correct
+    except BaseException as exc:  # noqa: BLE001 - every packet needs an output row
         print(f"[warn] {case_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
         if os.environ.get("MIB_DEBUG"):
             traceback.print_exc()
@@ -120,12 +110,8 @@ def process_one(pdf_path_str: str) -> dict:
 def corpus_reference_date(records) -> str | None:
     """Approximate packet receipt date for the staleness rule.
 
-    Packets carry only an arrival date -- there is no receipt date to read (the
-    forensics pass found exactly one date per packet). Rather than hardcode a
-    constant fitted to the public corpus, take the latest arrival date actually
-    present in the set being scored: intake cannot receive a packet before the
-    applicant arrives, so the newest arrival is a lower bound on "now" for this
-    corpus. A private test set from a different period then still works.
+    Packets carry an arrival date but no receipt date. The reference is derived
+    from arrival dates in the corpus rather than fixed to the public dataset.
     """
     import datetime as dt
     dates = []
@@ -138,29 +124,13 @@ def corpus_reference_date(records) -> str | None:
         except (ValueError, TypeError):
             continue
     if not dates:
-        # No readable date anywhere in the corpus. Any constant here would be
-        # fitted to the era of whatever set it was chosen on, so return None and
-        # let staleness be *undeterminable* -- `_is_stale` already reports that
-        # honestly, and `decision_path` has a `staleness_indeterminate` branch
-        # for it. Guessing a date would silently manufacture staleness verdicts
-        # out of nothing.
+        # Without a corpus date, staleness remains indeterminate.
         return None
     dates.sort()
 
-    # Trim outliers *before* taking the percentile.
-    #
-    # A high percentile alone is not enough. It survives a single misread, but
-    # `6` and `8` collide often enough that a whole *cluster* of packets reads
-    # "2028" where the truth is "2026" -- 33 of 1,000 once literal mining began
-    # recovering dates the label parser had been dropping. At 3.3% contamination
-    # the 98th percentile lands inside the bad cluster, which pushed the
-    # reference two years out, marked 372 packets stale, and cost 3.3
-    # classification points.
-    #
-    # The median cannot be moved by 3% contamination, so measure distance from
-    # it. The window floor is deliberately generous -- it must not trim a corpus
-    # that genuinely spans a wide range. The goal is only to drop dates that sit
-    # implausibly far from every other date in the same corpus.
+    # Remove distant year clusters before selecting the upper percentile.
+    # OCR errors such as 6/8 substitutions are correlated across scans, so a
+    # median-centered window is more stable than an untrimmed percentile.
     median = dates[len(dates) // 2]
     deviations = sorted(abs((d - median).days) for d in dates)
     mad = deviations[len(deviations) // 2]
@@ -174,11 +144,8 @@ def corpus_reference_date(records) -> str | None:
 def corpus_median_date(records) -> str | None:
     """Median arrival date of the corpus being scored.
 
-    Used to fill `arrival_date` on packets where no trusted evidence supplied
-    one. The evaluator scores a wrong value exactly like a blank and drops
-    genuinely unrecoverable fields from the denominator, so this guess is free
-    upside -- but only if it is drawn from the corpus in hand rather than from
-    the era of the public training set.
+    Used only for the printed output when no trusted arrival date is available.
+    The value is derived from the current corpus rather than the public dataset.
     """
     import datetime as dt
     dates = []
@@ -311,9 +278,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[info] staleness reference date: {reference}", file=sys.stderr)
     print(f"[info] corpus arrival years: {years}", file=sys.stderr)
     print(f"[info] corpus-derived revoked sponsors: {sorted(revoked)}", file=sys.stderr)
-    print(f"[info] adjudicator: "
-          f"{'model ' + str(_ADJUDICATOR.metadata.get('kind')) if _ADJUDICATOR else 'hand-built paths'}",
-          file=sys.stderr)
+    adjudicator_name = (
+        "model " + str(_ADJUDICATOR.metadata.get("kind"))
+        if _ADJUDICATOR else "hand-built paths"
+    )
+    print(f"[info] adjudicator: {adjudicator_name}", file=sys.stderr)
 
     final: dict[str, dict] = {}
     for case_id, row in rows.items():

@@ -1,29 +1,15 @@
 """Span-level PDF text extraction with visibility classification.
 
-This is the foundation of the trust layer, and it exists because of one
-non-obvious PyMuPDF behaviour found by probing (see WORKLOG):
-
-    `page.get_text()` silently drops every span whose geometry falls outside the
-    **CropBox**.
-
-That default is safe but useless. Text placed outside the visible crop is one of
-the injection vectors `EVALUATION.md` names explicitly, and a system that simply
-never sees it cannot distinguish "this field has no trusted evidence" from "this
-field was supplied by an injection" -- a distinction the scoring rewards.
-
-So we deliberately do the opposite: record the true visible crop, widen the
-CropBox to the MediaBox so hidden geometry becomes extractable, then classify
-every span against the *original* crop. Nothing is thrown away, and nothing
-hidden is ever mistaken for visible.
+PyMuPDF omits spans outside the CropBox from normal text extraction. The parser
+records the visible crop, temporarily widens it to the MediaBox, and classifies
+each extracted span against the original crop. This exposes off-crop content to
+the quarantine logic without treating it as visible evidence.
 
 Visibility is decided by three independent signals:
 
-  * **render mode / alpha** -- invisible text (PDF text render mode 3) is the
-    classic OCR-layer trick and the classic hiding place. PyMuPDF reports
-    ``alpha`` on a 0-255 scale, *not* 0-1; an early version of this code used
-    ``alpha == 0`` with a default of ``1``, which happened to work only by luck.
-  * **colour vs. background** -- white-on-white text.
-  * **geometry** -- outside the visible crop.
+  * render mode and alpha;
+  * foreground color relative to the page background; and
+  * geometry outside the visible crop.
 """
 
 from __future__ import annotations
