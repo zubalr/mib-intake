@@ -227,3 +227,78 @@ class TestReasonScoping:
         text = ("Manual Adjudicator Note Reason: Clean or exception-qualified "
                 "packet. Denial supported by damaged policy notes.")
         assert parse_fields(text)[2].get("note_finding") is None
+
+
+class TestAbbreviatedLabels:
+    """Sponsor letters abbreviate the labels the intake form spells out."""
+
+    def test_short_labels_parse(self):
+        fields = parse_fields("Purpose: cultural exchange")[0]
+        assert fields.get("declared_purpose") == "cultural exchange"
+        assert parse_fields("World: Wolf-1061c")[0].get("home_world") == "Wolf-1061c"
+        assert parse_fields("Species: TRIANGULAN")[0].get("species_code") == "TRIANGULAN"
+
+    def test_long_labels_still_parse(self):
+        fields = parse_fields("Declared Purpose: reactor maintenance")[0]
+        assert fields.get("declared_purpose") == "reactor maintenance"
+        assert parse_fields("Home World: Luyten-b")[0].get("home_world") == "Luyten-b"
+
+    def test_free_text_fields_did_not_get_short_labels(self):
+        # Deliberately NOT aliased: nothing rejects a plausible-looking string
+        # for these, so a short label breaks far more than it fixes.
+        for line, field in (("Sponsor: SPN-1234", "sponsor_id"),
+                            ("Fee: paid", "fee_status"),
+                            ("Arrival: 2026-05-01", "arrival_date")):
+            assert parse_fields(line)[0].get(field) is None, line
+
+
+class TestReasonFacts:
+    """The reason clause states facts, not only a verdict."""
+
+    def test_fee_status_from_reason(self):
+        extras = parse_fields("Adjudicator Note Finding: DENIED "
+                              "Reason: Mandatory fee unpaid")[2]
+        assert extras.get("reason_fee_status") == "unpaid"
+        assert parse_fields("Reason: Fee status unknown.")[2] \
+            .get("reason_fee_status") == "unknown"
+
+    def test_home_world_from_reason(self):
+        # The finding for this rationale is only 67% pure (6 DENIED / 3
+        # NEEDS_REVIEW) so it is NOT read as a verdict -- but the world it names
+        # is a fact, and that is safe to read.
+        extras = parse_fields("Manual Agjudicator Note | | "
+                              "Reason: Embargo home world: Wolf-1061c.")[2]
+        assert extras.get("reason_home_world") == "Wolf-1061c"
+        assert extras.get("note_finding") is None
+
+    def test_watermark_blocks_reason_facts_too(self):
+        extras = parse_fields("SAMPLE DENIAL Reason: Mandatory fee unpaid")[2]
+        assert extras.get("reason_fee_status") is None
+
+    def test_facts_survive_a_note_that_already_has_a_finding(self):
+        # The fact extraction must not be gated on the finding being missing.
+        extras = parse_fields("Finding: DENIED. Reason: Mandatory fee unpaid.")[2]
+        assert extras.get("note_finding") == "DENIED"
+        assert extras.get("reason_fee_status") == "unpaid"
+
+
+class TestFeeFromReceipt:
+    """A receipt states the fee three ways; two of them survive the third."""
+
+    def test_positive_amount_no_waiver_is_paid(self):
+        extras = parse_fields("MIB Fee Receipt Amount $809.00 Waiver Code N/A")[2]
+        assert extras.get("receipt_fee_status") == "paid"
+
+    def test_zero_amount_with_waiver_is_waived(self):
+        extras = parse_fields("Fee Receipt Amount $0.00 Waiver Code DIP-WAIVER")[2]
+        assert extras.get("receipt_fee_status") == "waived"
+
+    def test_zero_amount_no_waiver_is_ambiguous(self):
+        # 12 unpaid vs 10 unknown on the training corpus -- genuinely undecidable,
+        # so it must yield nothing rather than guess the majority.
+        extras = parse_fields("Fee Receipt Amount $0.00 Waiver Code N/A")[2]
+        assert extras.get("receipt_fee_status") is None
+
+    def test_needs_both_facts(self):
+        assert parse_fields("Amount $809.00")[2].get("receipt_fee_status") is None
+        assert parse_fields("Waiver Code N/A")[2].get("receipt_fee_status") is None

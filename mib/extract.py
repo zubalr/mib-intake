@@ -375,6 +375,21 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                     # "no flags" -- the distinction that governs false approvals.
                     if extras.get("risk_panel_read"):
                         ev.risk_panel_read = True
+                    # A signed note that states a field value is the top
+                    # evidence tier, so these are recorded at ADJUDICATOR trust
+                    # rather than as another SCANNED candidate.
+                    # Same page, same authority as the printed status line, so
+                    # the same trust tier -- `_resolve` then breaks the tie by
+                    # plausibility if both are present and disagree.
+                    if extras.get("receipt_fee_status"):
+                        _record(ev, "fee_status", extras["receipt_fee_status"],
+                                FEE, TRUST_ORDER[FEE], page_no)
+                    if extras.get("reason_fee_status"):
+                        _record(ev, "fee_status", extras["reason_fee_status"],
+                                ADJUDICATOR, TRUST_ORDER[ADJUDICATOR], page_no)
+                    if extras.get("reason_home_world"):
+                        _record(ev, "home_world", extras["reason_home_world"],
+                                ADJUDICATOR, TRUST_ORDER[ADJUDICATOR], page_no)
                     if "RISK PANEL MISSING" in text.upper():
                         ev.risk_panel_missing = True
 

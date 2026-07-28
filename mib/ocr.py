@@ -84,6 +84,21 @@ OCR_LABELS = {
     "home world": "home_world",
     "species code": "species_code",
     "species match": "species_code",
+    # The intake form writes "Declared Purpose:" and "Home World:"; the sponsor
+    # letter abbreviates to "Purpose:" and "World:". The short forms were absent
+    # entirely, so a *perfectly read* sponsor-letter line failed to parse -- which
+    # is why declared_purpose (40%) and home_world had the highest recoverable
+    # rates in the corpus.
+    #
+    # Restricted to closed-vocabulary fields on purpose. Measured over 851
+    # scanned packets, these three recover 42 values and break **zero**, because
+    # a spurious capture has to survive `Lexicon.snap` against a 10-13 value set
+    # and does not. The same treatment for free-text fields (sponsor id, arrival
+    # date, applicant name, fee status) breaks far more than it fixes -- nothing
+    # rejects a plausible-looking string.
+    "purpose": "declared_purpose",
+    "world": "home_world",
+    "species": "species_code",
     "arrival date": "arrival_date",
     "visa class": "visa_class",
     "sponsor id": "sponsor_id",
@@ -196,6 +211,68 @@ _REASON_FINDINGS_SCOPED = (
 # Identifies a page as an adjudicator note. `r?eason` because the leading letter
 # of a label is routinely clipped at the left edge of a scan ("eason:").
 _NOTE_PAGE_CUE = re.compile(r"(?i)adjud|manua[li1]\s*n|r?eason\s*[:;.]")
+
+
+# A fee receipt states the fee three ways, not one:
+#
+#     Fee Status | paid    Amount | $809.00   Waiver Code | N/A
+#     Fee Status | waived  Amount | $0.00     Waiver Code | DIP-WAIVER
+#
+# so when the status line is destroyed -- or contradicted, which this corpus does
+# deliberately -- the other two still say what it was. Measured over 400 packets:
+#
+#     positive amount + no waiver code -> paid    118/118 = 100%
+#     zero amount + a waiver code      -> waived   37/37  = 100%
+#     zero amount + no waiver code     -> unpaid   12/22  =  55%   <- rejected
+#
+# The third is genuinely ambiguous (unpaid vs unknown), so it is not derived.
+# This is *corroborating* evidence at the same trust tier as the status line, not
+# a guess: it is printed on the same page by the same authority.
+_AMOUNT_RE = re.compile(r"(?i)am[o0c]unt\W{0,4}\$?\s*([\d,]+(?:[.,]\d{2})?)")
+_WAIVER_CODE_RE = re.compile(r"(?i)wa[il1]ver\s*c[o0]de\W{0,4}([A-Za-z0-9\-/]{2,20})")
+_NO_WAIVER = frozenset({"N/A", "NA", "NONE", "N/4", "WA"})
+
+
+def _fee_from_receipt(text: str) -> str | None:
+    """Fee status implied by the amount and waiver code on a receipt."""
+    amount_match = _AMOUNT_RE.search(text)
+    waiver_match = _WAIVER_CODE_RE.search(text)
+    if not amount_match or not waiver_match:
+        return None
+    try:
+        amount = float(amount_match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    waived = waiver_match.group(1).strip().upper() not in _NO_WAIVER
+    if amount > 0 and not waived:
+        return "paid"
+    if amount == 0 and waived:
+        return "waived"
+    return None
+
+
+# The reason clause states facts as well as a verdict. "Mandatory fee unpaid"
+# and "Fee status unknown" name the fee status outright, on the signed note --
+# the top evidence tier, not a guess. Both are 100% pure across the 338 readable
+# notes; `embargo home world: X` also names a field but its *finding* is only 67%
+# pure, and that impurity is about the verdict, not the world, so the world is
+# safe to read even though the verdict is not.
+_REASON_FEE = (
+    (re.compile(r"(?i)mandat[o0]ry\W*fee\W*unpa[il1]d"), "unpaid"),
+    (re.compile(r"(?i)fee\W*status\W*unkn[o0]wn"), "unknown"),
+)
+_REASON_WORLD = re.compile(r"(?i)embarg[o0]\W*h[o0]me\W*w[o0]r[li1]d\W{0,3}([A-Za-z][\w\- ]{2,18})")
+
+
+def _facts_from_reason(text: str, extras: dict) -> None:
+    """Record field values the note's reason clause states outright."""
+    for pattern, value in _REASON_FEE:
+        if pattern.search(text):
+            extras.setdefault("reason_fee_status", value)
+            break
+    match = _REASON_WORLD.search(text)
+    if match:
+        extras.setdefault("reason_home_world", match.group(1).strip(" .,|"))
 
 
 def _finding_from_reason(text: str) -> str | None:
@@ -520,11 +597,18 @@ def parse_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, str]]:
                 extras["note_finding"] = finding
                 extras["note_reason"] = ""
                 break
-    if "note_finding" not in extras and "SAMPLE" not in text.upper():
-        finding = _finding_from_reason(text)
-        if finding:
-            extras["note_finding"] = finding
-            extras["note_reason"] = ""
+    if "SAMPLE" not in text.upper():
+        if "note_finding" not in extras:
+            finding = _finding_from_reason(text)
+            if finding:
+                extras["note_finding"] = finding
+                extras["note_reason"] = ""
+        # Independent of whether a finding was read: the reason clause can state
+        # a field value even on a note whose verdict we already have.
+        _facts_from_reason(text, extras)
+    derived_fee = _fee_from_receipt(text)
+    if derived_fee:
+        extras["receipt_fee_status"] = derived_fee
     for match in _NOTE_FLAG_RE.finditer(text):
         flags.append(match.group(1).strip(" ."))
     for match in _FLAG_LITERAL_RE.finditer(text):
