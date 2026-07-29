@@ -113,3 +113,7 @@ PYTHONPATH=. .venv/bin/python tools/train_adjudicator.py \
   --labels ../mib-doc-challenge/data/train_labels.csv \
   --out policy/adjudicator.joblib
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
