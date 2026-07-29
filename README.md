@@ -8,19 +8,20 @@ JSONL prediction per packet. Each prediction contains nine extracted fields,
 an `APPROVED`, `DENIED`, or `NEEDS_REVIEW` decision, and a calibrated
 confidence.
 
-Current public-data estimate: **128.53 ± 0.16 / 150 out of fold**.
+On the public training set the shipped image scores **133.93 / 150**. The
+repeated out-of-fold estimate is **128.53 / 150, SE 0.16**.
 
-| Section | Out of fold |
-| --- | ---: |
-| Extraction | 44.15 / 50 |
-| Classification | 67.88 / 80 |
-| Calibration | 16.50 / 20 |
-| Mean confidence Brier | 0.0874 |
+| Section | Training set | Out of fold |
+| --- | ---: | ---: |
+| Extraction | 44.16 / 50 | 44.15 / 50 |
+| Classification | 72.69 / 80 | 67.88 / 80 |
+| Calibration | 17.07 / 20 | 16.50 / 20 |
+| Mean confidence Brier | 0.0732 | 0.0874 |
 
-The estimate uses repeated stratified cross-validation over ten fold
-assignments: every held-out prediction comes from a model that did not train on
-that packet. The same image scores 133.93 / 150 on the full training set, which
-is in-sample and reported in [MEMO.md](MEMO.md) for completeness only.
+The training-set score is in-sample. The out-of-fold estimate uses repeated
+stratified cross-validation over ten fold assignments, so every held-out
+prediction comes from a model that did not train on that packet; it is the
+figure to use for unseen packets. See [MEMO.md](MEMO.md).
 
 The final model is trained on document-derived evidence only. It does not
 receive case IDs, filenames, hidden answer text, or any packet-identifying

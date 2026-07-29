@@ -316,9 +316,9 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                 ev.note_finding = note.group(1).upper()
                 ev.note_reason = note.group(2).strip()
                 # The reason clause states facts, not only a verdict. The
-                # scanned-note path has read them since run 28; the typed path
-                # never did, so a note that survived *perfectly* in the text
-                # layer gave up less than the same note read through OCR.
+                # scanned-note path reads them; without this the typed path did
+                # not, so a note that survived *perfectly* in the text layer
+                # yielded less than the same note recovered through OCR.
                 _note_reason_facts(ev, note.group(2), page_no)
 
             # A signed manual correction outranks the printed field beside it.

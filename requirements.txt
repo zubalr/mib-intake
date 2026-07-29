@@ -1,12 +1,10 @@
 # Pinned for reproducibility. Everything here is offline at runtime.
 #
 # These versions MUST match the environment `tools/train_adjudicator.py` runs
-# in. They drifted once: the adjudicator was pickled by scikit-learn 1.9.0 while
-# the image installed 1.7.2, so every container run unpickled the model through
-# a version sklearn itself warns "might lead to breaking code or invalid
-# results". The run completed and the output looked fine, which is exactly what
-# made it dangerous. `tools/check_env.py` asserts the match -- run it before
-# building the image.
+# in. A model pickled under one scikit-learn version and unpickled under another
+# loads with a warning rather than an error and still produces plausible output,
+# so the mismatch is silent. `tools/check_env.py` asserts the match; run it
+# before building the image.
 PyMuPDF==1.28.0
 pytesseract==0.3.13
 Pillow==12.3.0
@@ -15,6 +13,6 @@ numpy==2.5.1
 scikit-learn==1.9.0
 joblib==1.5.3
 # Transitive, pinned anyway: an unpinned scipy is free to move under a pinned
-# scikit-learn and reintroduce exactly the drift described above.
+# scikit-learn and reintroduce the same silent mismatch.
 scipy==1.18.0
 threadpoolctl==3.6.0
