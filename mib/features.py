@@ -15,9 +15,12 @@ from mib.extract import (
     FEE,
     INTAKE,
     MANUAL_CORRECTION,
+    POLICY_TRUST_MAX,
     REGISTRY,
     SCANNED,
+    SCANNED_FALLBACK,
     SPONSOR,
+    TRUST_ORDER,
     PacketEvidence,
 )
 from mib.policy import (
@@ -86,8 +89,17 @@ def refresh_temporal(features: dict[str, float], record: Record) -> dict[str, fl
     return features
 
 
-def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
-    """Flat numeric feature vector for one packet."""
+def packet_features(ev: PacketEvidence, record: Record,
+                    promote: frozenset[str] = frozenset()) -> dict[str, float]:
+    """Flat numeric feature vector for one packet.
+
+    `promote` is the fallback-OCR permission set the `Record` was assembled
+    under. The features have to agree with it: a model told a field is covered
+    while the policy still treats it as unread is reading a different packet
+    from the one being adjudicated.
+    """
+    policy_trust_max = (TRUST_ORDER[SCANNED_FALLBACK] if "fields" in promote
+                        else POLICY_TRUST_MAX)
     flags = record.flag_set()
     feats: dict[str, float] = {}
 
@@ -95,13 +107,26 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
     feats["path__" + decision_path(record)] = 1.0
 
     # Evidence coverage.
+    #
+    # "Known" means *policy-grade* evidence, under the same trust ceiling the
+    # `Record` was resolved with. A value only the fallback OCR engine recovered
+    # is good enough to print and not good enough to count as coverage: telling
+    # the model a field is settled while the policy still treats it as unread is
+    # exactly the sentinel collision `fee_known` was fixed for.
     known = 0
     for field in SCORED_FIELDS:
-        have = bool(ev.best(field) and ev.best(field).trusted)
+        have = any(o.trusted and o.trust <= policy_trust_max
+                   for o in ev.values(field))
         feats[f"known_{field}"] = float(have)
         known += have
     feats["known_field_count"] = float(known)
     feats["known_field_frac"] = known / len(SCORED_FIELDS)
+    # Coverage the fallback engine added on top, as its own signal: a packet
+    # that needed the second engine is a differently-conditioned packet.
+    feats["fallback_recovered"] = float(sum(
+        1 for field in SCORED_FIELDS
+        if not feats[f"known_{field}"]
+        and any(o.trusted for o in ev.values(field))))
     # "Did we read the fee status" is not "is it a value other than unknown".
     # A receipt that states `unknown` was read perfectly; treating those 45
     # packets as unreadable is the same sentinel collision the decision path
@@ -130,12 +155,19 @@ def packet_features(ev: PacketEvidence, record: Record) -> dict[str, float]:
     for flag in sorted(DISQUALIFYING_FLAGS | REVIEW_FLAGS):
         feats[f"flag_{flag}"] = float(flag in flags)
     feats["risk_flags_known"] = float(record.risk_flags_known)
-    feats["risk_panel_missing"] = float(ev.risk_panel_missing)
-    feats["risk_panel_read"] = float(ev.risk_panel_read)
+    panel_read = ev.risk_panel_read
+    panel_missing = ev.risk_panel_missing
+    if "panel" in promote:
+        panel_read = panel_read or ev.fallback_risk_panel_read
+        panel_missing = panel_missing or ev.fallback_risk_panel_missing
+    feats["risk_panel_missing"] = float(panel_missing)
+    feats["risk_panel_read"] = float(panel_read)
+    biometric = ev.biometric_confidence
+    if biometric is None and "fields" in promote:
+        biometric = ev.fallback_biometric_confidence
     # -1 encodes "not printed", which is distinct from a genuine low score.
-    feats["biometric_confidence"] = (
-        ev.biometric_confidence if ev.biometric_confidence is not None else -1.0)
-    feats["biometric_confidence_known"] = float(ev.biometric_confidence is not None)
+    feats["biometric_confidence"] = biometric if biometric is not None else -1.0
+    feats["biometric_confidence_known"] = float(biometric is not None)
 
     # Categorical fields.
     for visa in VISA_CLASSES:

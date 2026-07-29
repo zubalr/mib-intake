@@ -48,6 +48,10 @@ UNKNOWN_PAGE = "unknown"
 # A scan of a visible page is visible evidence but carries additional OCR risk. It ranks
 # below the crisp text layer (OCR can misread) but far above anything hidden.
 SCANNED = "scanned_page"
+# The same scan, read by the second OCR engine. Deliberately the least trusted
+# visible source there is: it exists to fill gaps the primary engine left, never
+# to arbitrate against it.
+SCANNED_FALLBACK = "scanned_page_fallback"
 
 PAGE_TITLES = [
     ("Manual Adjudicator Note", ADJUDICATOR),
@@ -73,8 +77,14 @@ TRUST_ORDER = {
     REGISTRY: 5,
     FEE: 2,          # authoritative for fee_status only
     SCANNED: 6,
+    SCANNED_FALLBACK: 7,
     UNKNOWN_PAGE: 9,
 }
+
+# Sources whose readings may settle the policy `Record`. A fallback reading can
+# always be *printed* -- a guess costs nothing an empty field does not -- but
+# letting it drive an adjudication is a separate decision, made separately.
+POLICY_TRUST_MAX = TRUST_ORDER[SCANNED]
 
 LABEL_MIN, LABEL_MAX = 7.5, 8.5
 TITLE_MIN = 13.0
@@ -195,6 +205,22 @@ class PacketEvidence:
     sponsor_letter_class: str | None = None
     has_text_layer: bool = True
     ocr_pages: int = 0
+    # Pages the second OCR engine also read.
+    fallback_pages: int = 0
+    # The same non-field signals, as the second OCR engine read them. Held in
+    # separate slots rather than merged into the fields above because they have
+    # no trust order to protect them: a flag joins a set, a note finding
+    # overrides the whole adjudication. `mib.pipeline.assemble` decides which of
+    # them may take effect, and each decision was measured on its own.
+    fallback_observed_flags: list[str] = field(default_factory=list)
+    fallback_flag_candidates: list[str] = field(default_factory=list)
+    fallback_note_finding: str | None = None
+    fallback_note_reason: str = ""
+    fallback_risk_panel_read: bool = False
+    fallback_risk_panel_missing: bool = False
+    fallback_registry_status: str | None = None
+    fallback_waiver_code: str | None = None
+    fallback_biometric_confidence: float | None = None
     note_from_ocr: bool = False
     risk_panel_missing: bool = False
     # The risk panel was read, independently of whether it listed any flags.
@@ -214,6 +240,112 @@ class PacketEvidence:
     def best(self, field_name: str) -> Observation | None:
         vals = self.values(field_name)
         return vals[0] if vals else None
+
+
+# What an OCR engine's readings are allowed to contribute to the evidence set.
+#
+# The primary engine contributes everything. The fallback engine's permissions
+# are the experiment: each one was added only after repeated out-of-fold
+# measurement showed it paid on the full 150-point objective. `fields` is not
+# the whole story, because several of these signals bypass field resolution
+# entirely -- a note finding settles the case outright, and a mined flag joins a
+# set rather than competing for a slot.
+PRIMARY_CONTRIBUTIONS = frozenset(
+    {"fields", "literals", "flags", "note", "singletons", "reason_facts"})
+FALLBACK_CONTRIBUTIONS = frozenset(
+    {"fields", "literals", "flags", "note", "singletons", "reason_facts"})
+
+
+def _absorb(ev: "PacketEvidence", texts: list[str], page_no: int, source: str,
+            seen: set[tuple[str, str]], allow: frozenset[str]) -> None:
+    """Fold one engine's readings of one page into the evidence set.
+
+    `allow` gates each *kind* of contribution rather than each field, because
+    the kinds differ in how they can hurt. A field value competes for a slot and
+    loses to anything more trusted; a risk flag joins a set and can only add;
+    a note finding overrides the entire adjudication. They deserve separate
+    verdicts, and they got them.
+    """
+    trust = TRUST_ORDER[source]
+
+    def add(name: str, value: str) -> None:
+        key = (name, _clean(value).casefold())
+        if key in seen:
+            return
+        seen.add(key)
+        _record(ev, name, value, source, trust, page_no)
+
+    # Non-field signals from the fallback engine land in parallel slots, so the
+    # decision to act on them stays with `mib.pipeline.assemble` and can be
+    # measured. `p` prefixes every such attribute name.
+    p = "fallback_" if source == SCANNED_FALLBACK else ""
+
+    def first(attr: str, value) -> None:
+        """Set a single-valued signal, if nothing has claimed it yet."""
+        if value and getattr(ev, p + attr) is None:
+            setattr(ev, p + attr, value)
+
+    for text in texts:
+        fields, flags, extras = ocr_module.parse_fields(text)
+        if "fields" in allow:
+            for name, value in fields.items():
+                add(name, value)
+        if "flags" in allow:
+            getattr(ev, p + "observed_flags").extend(flags)
+            # An explicitly missing risk panel is unread evidence, not "no
+            # flags" -- the distinction that governs false approvals.
+            if extras.get("risk_panel_read"):
+                setattr(ev, p + "risk_panel_read", True)
+            if "RISK PANEL MISSING" in text.upper():
+                setattr(ev, p + "risk_panel_missing", True)
+        if "singletons" in allow:
+            first("registry_status", extras.get("registry_status"))
+            first("waiver_code", extras.get("waiver_code"))
+            if extras.get("biometric_confidence"):
+                try:
+                    first("biometric_confidence", min(
+                        100, int(extras["biometric_confidence"])) / 100.0)
+                except ValueError:
+                    pass
+        # A scanned adjudicator note is still the top evidence tier.
+        # Text-layer notes win if both exist.
+        if "note" in allow and extras.get("note_finding") \
+                and getattr(ev, p + "note_finding") is None:
+            setattr(ev, p + "note_finding", extras["note_finding"])
+            setattr(ev, p + "note_reason", extras.get("note_reason", ""))
+            if not p:
+                ev.note_from_ocr = True
+        # A signed note that states a field value is the top evidence tier, so
+        # these are recorded at ADJUDICATOR trust rather than as another
+        # candidate from the page they were read on. A *fallback* reading of
+        # such a note is not: the engine that read it is the whole question, so
+        # it stays at the fallback rank where it cannot displace anything.
+        if "reason_facts" in allow:
+            # Same page, same authority as the printed status line, so the same
+            # trust tier -- `_resolve` then breaks the tie by plausibility if
+            # both are present and disagree.
+            receipt_src = FEE if source == SCANNED else source
+            note_src = ADJUDICATOR if source == SCANNED else source
+            if extras.get("receipt_fee_status"):
+                _record(ev, "fee_status", extras["receipt_fee_status"],
+                        receipt_src, TRUST_ORDER[receipt_src], page_no)
+            if extras.get("reason_fee_status"):
+                _record(ev, "fee_status", extras["reason_fee_status"],
+                        note_src, TRUST_ORDER[note_src], page_no)
+            if extras.get("reason_home_world"):
+                _record(ev, "home_world", extras["reason_home_world"],
+                        note_src, TRUST_ORDER[note_src], page_no)
+
+    # Mined literals go in last, so a value parsed from its own label always
+    # wins the page-order tiebreak against one merely found floating in the text.
+    for text in texts:
+        if "literals" in allow:
+            for name, values in ocr_module.mine_literals(text).items():
+                for value in values:
+                    add(name, value)
+        if "flags" in allow:
+            getattr(ev, p + "flag_candidates").extend(
+                ocr_module.mine_flag_candidates(text))
 
 
 def _page_type(title: str) -> str:
@@ -354,8 +486,8 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
         doc = fitz.open(path)
         try:
             for page_no in scanned_pages:
-                texts, _rot = ocr_module.read_page(doc[page_no])
-                if not texts:
+                texts, fallback_texts, _rot = ocr_module.read_page(doc[page_no])
+                if not texts and not fallback_texts:
                     continue
                 ev.ocr_pages += 1
                 # Every reading of the page contributes candidates. Two
@@ -363,68 +495,18 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                 # recorded; `mib.pipeline` picks between them by how well each
                 # snaps onto the closed vocabulary, which is a far better
                 # arbiter than whichever variant happened to run first.
+                #
+                # The dedupe set is shared across both engines, so a fallback
+                # reading that merely agrees with the primary adds nothing.
                 seen: set[tuple[str, str]] = set()
-
-                def add(name: str, value: str) -> None:
-                    key = (name, _clean(value).casefold())
-                    if key in seen:
-                        return
-                    seen.add(key)
-                    _record(ev, name, value, SCANNED, TRUST_ORDER[SCANNED], page_no)
-
-                for text in texts:
-                    fields, flags, extras = ocr_module.parse_fields(text)
-                    for name, value in fields.items():
-                        add(name, value)
-                    ev.observed_flags.extend(flags)
-                    if extras.get("registry_status") and ev.registry_status is None:
-                        ev.registry_status = extras["registry_status"]
-                    if extras.get("waiver_code") and ev.waiver_code is None:
-                        ev.waiver_code = extras["waiver_code"]
-                    if extras.get("biometric_confidence") \
-                            and ev.biometric_confidence is None:
-                        try:
-                            ev.biometric_confidence = min(
-                                100, int(extras["biometric_confidence"])) / 100.0
-                        except ValueError:
-                            pass
-                    # A scanned adjudicator note is still the top evidence tier.
-                    # Text-layer notes win if both exist.
-                    if extras.get("note_finding") and ev.note_finding is None:
-                        ev.note_finding = extras["note_finding"]
-                        ev.note_reason = extras.get("note_reason", "")
-                        ev.note_from_ocr = True
-                    # An explicitly missing risk panel is unread evidence, not
-                    # "no flags" -- the distinction that governs false approvals.
-                    if extras.get("risk_panel_read"):
-                        ev.risk_panel_read = True
-                    # A signed note that states a field value is the top
-                    # evidence tier, so these are recorded at ADJUDICATOR trust
-                    # rather than as another SCANNED candidate.
-                    # Same page, same authority as the printed status line, so
-                    # the same trust tier -- `_resolve` then breaks the tie by
-                    # plausibility if both are present and disagree.
-                    if extras.get("receipt_fee_status"):
-                        _record(ev, "fee_status", extras["receipt_fee_status"],
-                                FEE, TRUST_ORDER[FEE], page_no)
-                    if extras.get("reason_fee_status"):
-                        _record(ev, "fee_status", extras["reason_fee_status"],
-                                ADJUDICATOR, TRUST_ORDER[ADJUDICATOR], page_no)
-                    if extras.get("reason_home_world"):
-                        _record(ev, "home_world", extras["reason_home_world"],
-                                ADJUDICATOR, TRUST_ORDER[ADJUDICATOR], page_no)
-                    if "RISK PANEL MISSING" in text.upper():
-                        ev.risk_panel_missing = True
-
-                # Mined literals go in last, so a value parsed from its own
-                # label always wins the page-order tiebreak against one merely
-                # found floating in the text.
-                for text in texts:
-                    for name, values in ocr_module.mine_literals(text).items():
-                        for value in values:
-                            add(name, value)
-                    ev.flag_candidates.extend(
-                        ocr_module.mine_flag_candidates(text))
+                _absorb(ev, texts, page_no, SCANNED, seen, PRIMARY_CONTRIBUTIONS)
+                # The fallback engine runs second and lands a trust rank lower,
+                # so every singleton below is already settled if the primary
+                # read it, and `_resolve` prefers the primary for every field.
+                if fallback_texts:
+                    _absorb(ev, fallback_texts, page_no, SCANNED_FALLBACK, seen,
+                            FALLBACK_CONTRIBUTIONS)
+                    ev.fallback_pages += 1
                 ev.page_types.append(SCANNED)
         finally:
             doc.close()

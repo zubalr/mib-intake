@@ -26,8 +26,11 @@ from mib.extract import (
     ADJUDICATOR,
     BIOMETRIC,
     MANUAL_CORRECTION,
+    POLICY_TRUST_MAX,
     SCANNED,
+    SCANNED_FALLBACK,
     SPONSOR,
+    TRUST_ORDER,
     PacketEvidence,
     parse_packet,
 )
@@ -59,6 +62,12 @@ FEE_VALUES = {"paid", "waived", "unpaid", "unknown"}
 _SPONSOR_RE = re.compile(r"^SPN-\d{4}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# An identity conflict must be evidenced by *crisp* identity documents. Any OCR
+# reading of a scan is excluded, whichever engine produced it -- two engines
+# disagreeing about a smudged name is a property of the smudge, not of the
+# applicant.
+_NOT_IDENTITY_SOURCES = (SCANNED, SCANNED_FALLBACK, MANUAL_CORRECTION, SPONSOR)
+
 
 def _candidate_score(field: str, value: str, lexicon: Lexicon) -> float:
     """How much a candidate value looks like a real value for its field.
@@ -84,16 +93,22 @@ def _candidate_score(field: str, value: str, lexicon: Lexicon) -> float:
     return 0.0
 
 
-def _resolve(ev: PacketEvidence, field: str, lexicon: Lexicon | None = None
-             ) -> str | None:
+def _resolve(ev: PacketEvidence, field: str, lexicon: Lexicon | None = None,
+             max_trust: int | None = None) -> str | None:
     """Most-trusted visible value for a field, or None if no trusted evidence.
 
     Where several equally-trusted observations exist -- several OCR variants of
     the same scan, or the same field printed on two pages of the same rank --
     the one that scores best as a *plausible value* wins, with page order as the
     final tiebreak so resolution stays deterministic.
+
+    `max_trust` excludes ranks below it. The printed output resolves over every
+    source; the policy `Record` resolves over a restricted set, which is how a
+    second-engine reading can fill a blank field without being allowed to swing
+    an adjudication.
     """
-    values = [o for o in ev.values(field) if o.trusted]
+    values = [o for o in ev.values(field) if o.trusted
+              and (max_trust is None or o.trust <= max_trust)]
     if not values:
         return None
     top = values[0].trust
@@ -104,8 +119,15 @@ def _resolve(ev: PacketEvidence, field: str, lexicon: Lexicon | None = None
                                     -o.page)).value
 
 
-def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
-    """Risk flags from the biometric slip plus cross-document conflicts."""
+def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon,
+                       with_fallback: bool = False) -> set[str]:
+    """Risk flags from the biometric slip plus cross-document conflicts.
+
+    `with_fallback` folds in what the second OCR engine read. Flags are a set,
+    so a fallback reading can only ever *add* one -- there is no trust order to
+    protect here, which is exactly why this needs its own verdict rather than
+    riding along with field resolution.
+    """
     flags: set[str] = set()
 
     # Two sources, deliberately snapped with different strictness.
@@ -113,7 +135,15 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
     # `observed_flags` came from the value side of an "Observed flags:" label,
     # so context already guarantees each token is a flag; truncation matching is
     # safe and recovers scans clipped to "resc" or "ifle".
-    for raw in ev.observed_flags:
+    observed = list(ev.observed_flags)
+    candidates = list(ev.flag_candidates)
+    registry = ev.registry_status
+    if with_fallback:
+        observed += ev.fallback_observed_flags
+        candidates += ev.fallback_flag_candidates
+        registry = registry or ev.fallback_registry_status
+
+    for raw in observed:
         snapped, conf = lexicon.snap_flag(raw, allow_truncation=True)
         if conf > 0.0:
             flags.add(snapped)
@@ -121,13 +151,13 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
     # `flag_candidates` were mined from free text with no label vouching for
     # them, so they get the strict rule. Anything unlike a flag returns
     # confidence 0 and is dropped.
-    for raw in ev.flag_candidates:
+    for raw in candidates:
         snapped, conf = lexicon.snap_flag(raw)
         if conf > 0.0:
             flags.add(snapped)
 
     # The registry extract states embargo status directly.
-    if ev.registry_status and "EMBARGO" in ev.registry_status.upper():
+    if registry and "EMBARGO" in registry.upper():
         flags.add("planetary_embargo")
 
     # A sponsor letter naming a different sponsor than the intake form.
@@ -143,7 +173,7 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
         letter_name, letter_conf = lexicon.snap_name(ev.sponsor_letter_name)
         identity = set()
         for obs in ev.values("applicant_name"):
-            if obs.source in (SCANNED, MANUAL_CORRECTION, SPONSOR):
+            if obs.source in _NOT_IDENTITY_SOURCES:
                 continue
             snapped, conf = lexicon.snap_name(obs.value)
             if conf > 0.0:
@@ -156,7 +186,7 @@ def _derive_risk_flags(ev: PacketEvidence, lexicon: Lexicon) -> set[str]:
     if "applicant_name" not in ev.corrections:
         crisp = set()
         for obs in ev.values("applicant_name"):
-            if obs.source in (SCANNED, MANUAL_CORRECTION, SPONSOR):
+            if obs.source in _NOT_IDENTITY_SOURCES:
                 continue
             snapped, conf = lexicon.snap_name(obs.value)
             # Only a confidently-recognised name can evidence a conflict.
@@ -178,8 +208,60 @@ class Extraction:
     features: dict[str, float]
 
 
-def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
-    """Phase 1: read a packet into printable fields plus a policy Record.
+def _fee_value(raw: str | None, lexicon: Lexicon) -> str | None:
+    """The fee status this reading states, or None if it states none."""
+    if not raw:
+        return None
+    candidate = raw.strip().lower()
+    if candidate not in FEE_VALUES:
+        # Snap onto the closed vocabulary before giving up: an OCR'd
+        # "paig"/"waivec" is a perfectly recoverable "paid"/"waived".
+        snapped, conf = lexicon.snap("fee_status", candidate)
+        candidate = snapped.lower() if conf > 0.0 else candidate
+    return candidate if candidate in FEE_VALUES else None
+
+
+def _snap(field: str, value: str | None, lexicon: Lexicon) -> str | None:
+    """Normalise a raw reading onto its vocabulary, or reject it as debris."""
+    if value is None:
+        return None
+    if field in SNAP_FIELDS:
+        snapped, conf = lexicon.snap(field, value)
+        # Nothing in the closed set is close, so what we read is OCR debris
+        # rather than a value. Printing it is a certain miss where the prior
+        # mode has the base rate, and -- more importantly -- feeding it to the
+        # policy engine as though it were a known visa class silently corrupts
+        # the decision path. Treat it as unread.
+        return snapped if conf > 0.0 else None
+    if field == "applicant_name":
+        snapped, conf = lexicon.snap_name(value)
+        return snapped if conf > 0.0 else value
+    return value
+
+
+# Which fallback-engine signals may take effect. Each entry was decided by
+# repeated out-of-fold measurement on the full 150-point objective, not by
+# whether the reading looked plausible.
+#
+#   fields  -- fallback field values may settle the policy Record, not just
+#              the printed output. Printing is unconditional: a guess costs
+#              nothing that an empty field does not.
+#   flags   -- fallback risk flags join the flag set.
+#   note    -- a fallback-read adjudicator finding may settle the case.
+#   panel   -- a fallback read counts as having read the risk panel, which is
+#              what turns "no flags found" into evidence of no flags.
+PROMOTE: frozenset[str] = frozenset()
+
+
+def extract_packet(pdf_path: Path, lexicon: Lexicon,
+                   promote: frozenset[str] = PROMOTE) -> "Extraction":
+    """Phase 1: read a packet into printable fields plus a policy Record."""
+    return assemble(parse_packet(pdf_path), lexicon, promote)
+
+
+def assemble(ev: PacketEvidence, lexicon: Lexicon,
+             promote: frozenset[str] = PROMOTE) -> "Extraction":
+    """Turn an evidence set into printable fields plus a policy Record.
 
     Deliberately does no adjudicating. The staleness rule needs a packet
     *receipt* date, and the forensics pass established that packets carry only
@@ -187,36 +269,27 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
     hardcode a constant tuned to the public corpus, the reference date is
     derived from the corpus being scored (see `corpus_reference_date`), which is
     what lets the staleness rule survive a private test set from another era.
-    """
-    ev = parse_packet(pdf_path)
 
+    Split out from `extract_packet` so the same evidence can be assembled under
+    different trust ceilings without re-reading the PDF, which is what makes
+    evaluating the fallback engine's promotion options affordable.
+    """
     resolved: dict[str, str] = {}
     printed: dict[str, str] = {}
+    policy_trust_max = (TRUST_ORDER[SCANNED_FALLBACK] if "fields" in promote
+                        else POLICY_TRUST_MAX)
 
     for field in ("applicant_name", *SNAP_FIELDS, "sponsor_id", "arrival_date"):
-        value = _resolve(ev, field, lexicon)
+        # Printed output resolves over every source; the policy record resolves
+        # only over sources allowed to drive an adjudication.
+        shown = _snap(field, _resolve(ev, field, lexicon), lexicon)
+        trusted = _snap(field, _resolve(ev, field, lexicon, policy_trust_max),
+                        lexicon)
 
-        if value is not None:
-            if field in SNAP_FIELDS:
-                snapped, conf = lexicon.snap(field, value)
-                if conf > 0.0:
-                    value = snapped
-                else:
-                    # Nothing in the closed set is close, so what we read is
-                    # OCR debris rather than a value. Printing it is a certain
-                    # miss where the prior mode has the base rate, and -- more
-                    # importantly -- feeding it to the policy engine as though
-                    # it were a known visa class silently corrupts the decision
-                    # path. Treat it as unread.
-                    value = None
-            elif field == "applicant_name":
-                snapped, conf = lexicon.snap_name(value)
-                if conf > 0.0:
-                    value = snapped
-
-        if value is not None:
-            resolved[field] = value
-            printed[field] = value
+        if trusted is not None:
+            resolved[field] = trusted
+        if shown is not None:
+            printed[field] = shown
             continue
 
         # No trusted evidence: print a prior guess but keep it UNKNOWN for policy.
@@ -229,30 +302,37 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
         else:
             printed[field] = lexicon.prior_mode(field)
 
-    fee_raw = _resolve(ev, "fee_status", lexicon)
-    fee = UNKNOWN
     # Did trusted evidence *state* a fee status? `unknown` is a value a receipt
     # prints, and it is also the sentinel for having read nothing, so the two
     # are indistinguishable downstream unless the distinction is captured here.
-    fee_observed = False
-    if fee_raw:
-        candidate = fee_raw.strip().lower()
-        if candidate not in FEE_VALUES:
-            # Snap onto the closed vocabulary before giving up: an OCR'd
-            # "paig"/"waivec" is a perfectly recoverable "paid"/"waived".
-            snapped, conf = lexicon.snap("fee_status", candidate)
-            candidate = snapped.lower() if conf > 0.0 else candidate
-        if candidate in FEE_VALUES:
-            fee = candidate
-            fee_observed = True
+    fee = _fee_value(_resolve(ev, "fee_status", lexicon, policy_trust_max),
+                     lexicon)
+    fee_observed = fee is not None
+    shown_fee = _fee_value(_resolve(ev, "fee_status", lexicon), lexicon)
 
     # Print what the document said, including a stated "unknown" -- guessing the
     # prior mode there overwrites a correct value with `paid`. The fallback is
     # only for fields nothing trustworthy stated.
-    printed["fee_status"] = fee if fee_observed else lexicon.prior_mode("fee_status")
+    printed["fee_status"] = shown_fee or lexicon.prior_mode("fee_status")
+    fee = fee or UNKNOWN
 
-    flags = _derive_risk_flags(ev, lexicon)
-    printed["risk_flags"] = "|".join(sorted(flags)) if flags else "none"
+    # Flags are always *printed* from both engines -- an extra flag that the
+    # second engine read is worth the same as one the first did, and there is no
+    # trust order to violate. Whether they reach the policy record is separate.
+    shown_flags = _derive_risk_flags(ev, lexicon, with_fallback=True)
+    flags = (shown_flags if "flags" in promote
+             else _derive_risk_flags(ev, lexicon))
+    printed["risk_flags"] = ("|".join(sorted(shown_flags)) if shown_flags
+                             else "none")
+
+    note_finding = ev.note_finding
+    panel_read = ev.risk_panel_read
+    panel_missing = ev.risk_panel_missing
+    if "note" in promote:
+        note_finding = note_finding or ev.fallback_note_finding
+    if "panel" in promote:
+        panel_read = panel_read or ev.fallback_risk_panel_read
+        panel_missing = panel_missing or ev.fallback_risk_panel_missing
 
     # "No flags found" is only meaningful if we actually read the page that
     # carries them: the biometric slip or an adjudicator note that states the
@@ -262,10 +342,13 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
     # the complete risk panel was read.
     flags_known = (bool(flags)
                    or BIOMETRIC in ev.page_types
-                   or ev.risk_panel_read
-                   or ev.note_finding is not None) and not ev.risk_panel_missing
+                   or panel_read
+                   or note_finding is not None) and not panel_missing
 
-    waiver = (ev.waiver_code or "").upper()
+    waiver = ev.waiver_code
+    if waiver is None and "fields" in promote:
+        waiver = ev.fallback_waiver_code
+    waiver = (waiver or "").upper()
     record = Record(
         case_id=ev.case_id,
         visa_class=resolved.get("visa_class", UNKNOWN),
@@ -283,10 +366,10 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon) -> "Extraction":
         has_scanned_pages=SCANNED in ev.page_types,
     )
 
-    note = ev.note_finding if ev.note_finding in (APPROVED, DENIED, NEEDS_REVIEW) else None
+    note = note_finding if note_finding in (APPROVED, DENIED, NEEDS_REVIEW) else None
     printed["_injection"] = "1" if ev.injection_detected else ""
     printed["_damaged"] = ",".join(sorted(ev.damaged_fields))
-    feats = packet_features(ev, record)
+    feats = packet_features(ev, record, promote)
     return Extraction(printed=printed, record=record, note=note, features=feats)
 
 

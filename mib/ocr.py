@@ -13,6 +13,7 @@ import re
 
 import fitz
 
+from mib import fallback_ocr
 from mib.lexicon import _canon, weighted_distance
 
 try:
@@ -412,14 +413,21 @@ def _ocr(image: "Image.Image", psm: int, rotation: int = 0) -> str:
         return ""
 
 
-def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]:
-    """OCR one page several ways. Returns (texts, rotation_used).
+def read_page(page: "fitz.Page", dpi: int = RENDER_DPI
+              ) -> tuple[list[str], list[str], int]:
+    """OCR one page several ways. Returns (texts, fallback_texts, rotation).
 
     Orientation is resolved once with the probe pass. Remaining variants use the
     same orientation, and the caller merges their field candidates.
+
+    `fallback_texts` come from the second engine and are returned *separately*
+    rather than merged, because the caller records them at a lower trust rank.
+    Keeping the two lists apart is what makes "a fallback read can never
+    displace a primary read" a property of the data rather than a rule every
+    call site has to remember to apply.
     """
     if not _OCR_AVAILABLE:
-        return [], 0
+        return [], [], 0
 
     renders: dict[int, "Image.Image"] = {dpi: _render(page, dpi)}
 
@@ -452,7 +460,8 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI) -> tuple[list[str], int]
                 break
 
     texts.extend(_note_header_reads(renders[dpi], texts))
-    return [t for t in texts if t.strip()], best_rot
+    return ([t for t in texts if t.strip()],
+            fallback_ocr.read(renders[dpi]), best_rot)
 
 
 # Adjudicator notes have no normal field labels, so the orientation probe cannot
