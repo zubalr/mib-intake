@@ -19,23 +19,21 @@ docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
 
 ## Public-data results
 
-The Docker image scores **137.51 / 150** on the complete public training set
-under the official evaluator. The repeated out-of-fold estimate is
-**130.62 / 150, SE 0.12**.
+The Docker image scores **137.83 / 150** on the complete public training set
+under the official evaluator.
 
-| Section | Training set | Out of fold |
-| --- | ---: | ---: |
-| Extraction | 44.99 / 50 | 44.99 / 50 |
-| Classification | 74.45 / 80 | 68.82 / 80 |
-| Calibration | 18.07 / 20 | 16.81 / 20 |
-| Total | **137.51 / 150** | **130.62 / 150** |
-| Mean confidence Brier | 0.0482 | 0.0797 |
-| Catastrophic false approvals | 12 | 20.6 |
+| Section | Training set |
+| --- | ---: |
+| Extraction | 45.31 / 50 |
+| Classification | 74.45 / 80 |
+| Calibration | 18.07 / 20 |
+| Total | **137.83 / 150** |
+| Mean confidence Brier | 0.0482 |
+| Catastrophic false approvals | 12 |
 
-The training-set score is in-sample: the model was fitted on those rows. In the
-out-of-fold estimate, every held-out prediction comes from a model that did not
-train on that packet, and it is the figure to use for expected performance on
-unseen packets.
+This is in-sample: the model was fitted on these packets. It is a
+reproducibility figure, not an estimate of performance on unseen packets, and
+it comes from running the image itself under the submission constraints.
 
 ## Approach
 

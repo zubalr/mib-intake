@@ -8,20 +8,21 @@ JSONL prediction per packet. Each prediction contains nine extracted fields,
 an `APPROVED`, `DENIED`, or `NEEDS_REVIEW` decision, and a calibrated
 confidence.
 
-On the public training set the image scores **137.51 / 150**. The repeated
-out-of-fold estimate is **130.62 / 150, SE 0.12**.
+On the public training set the image scores **137.83 / 150**.
 
-| Section | Training set | Out of fold |
-| --- | ---: | ---: |
-| Extraction | 44.99 / 50 | 44.99 / 50 |
-| Classification | 74.45 / 80 | 68.82 / 80 |
-| Calibration | 18.07 / 20 | 16.81 / 20 |
-| Mean confidence Brier | 0.0482 | 0.0797 |
+| Section | Training set |
+| --- | ---: |
+| Extraction | 45.31 / 50 |
+| Classification | 74.45 / 80 |
+| Calibration | 18.07 / 20 |
+| Mean confidence Brier | 0.0482 |
+| Catastrophic false approvals | 12 |
 
-The training-set score is in-sample. The out-of-fold estimate uses repeated
-stratified cross-validation, so every held-out prediction comes from a model
-that did not train on that packet; it is the figure to use for unseen packets.
-See [MEMO.md](MEMO.md).
+This score is in-sample: the model was fitted on these packets, so it is a
+reproducibility figure rather than an estimate of performance on unseen ones.
+It is produced by the Docker image itself under the submission constraints, not
+by a cached intermediate. See [MEMO.md](MEMO.md) for the held-out diagnostics
+and their limits.
 
 The final model is trained on document-derived evidence only. It does not
 receive case IDs, filenames, hidden answer text, or any packet-identifying

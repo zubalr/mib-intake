@@ -2,24 +2,32 @@
 
 ## Result
 
-| Section | Training set | Out of fold |
+| Section | Training set | Model-fold diagnostic |
 | --- | ---: | ---: |
-| Extraction | 44.99 / 50 | 44.99 / 50 |
+| Extraction | 45.31 / 50 | 45.31 / 50 |
 | Classification | 74.45 / 80 | 68.82 / 80 |
 | Calibration | 18.07 / 20 | 16.81 / 20 |
-| Total | **137.51 / 150** | **130.62 / 150, SE 0.12** |
+| Total | **137.83 / 150** | 130.62 / 150, SE 0.12 |
 | Mean confidence Brier | 0.0482 | 0.0797 |
 | Catastrophic false approvals | 12 | 20.6 |
 
 The training-set column is the shipped Docker image scored on all 1,000 labeled
 packets with the official evaluator. It is reproducible and in-sample: the model
-was fitted on those rows.
+was fitted on those rows, so it measures reproducibility rather than expected
+performance.
 
-The out-of-fold column is the estimate for unseen packets. Every held-out
-prediction comes from a model that did not train on that packet. The gap between
-the columns is in-sample optimism, so the larger total should not be read as an
-expected score. Extraction is identical under both, as it does not depend on the
-model.
+The second column is a diagnostic on the classifier only, and it is worth being
+precise about what it does not cover. The gradient-boosting model is refitted on
+each training split, so no held-out packet contributes to the model scoring it.
+The deterministic path calibration is not refitted: it is estimated once over
+all 1,000 packets and then enters both the blend prior and the path features. A
+held-out packet therefore influences its own prior, which makes this an
+optimistic bound on held-out behaviour rather than a nested estimate. It is
+reported because the gap against the in-sample column is informative about
+model optimism, not as a prediction of the private score.
+
+Extraction is identical in both columns because it does not depend on the model
+at all.
 
 ## Scoring behaviour
 
@@ -88,9 +96,30 @@ these add 23 correct risk flags with no false additions, correct 21 fee
 transcriptions with no regressions, and make 19 packets newly exact.
 
 The fee correction is confined to printed output. Letting the same geometry
-reach the policy `Record` measured -0.073 out of fold: a fee that was `unknown`
-for want of evidence would start unlocking approvals, which is the conservative
-hedge the sentinel separation below exists to protect.
+reach the policy `Record` measured -0.073 on the held-out diagnostic: a fee that
+was `unknown` for want of evidence would start unlocking approvals, which is the
+conservative hedge the sentinel separation below exists to protect.
+
+Two further resolvers run on the printed side only, after the `Record` is
+closed. The first uses corroboration rather than precedence. Resolution picks a
+single best value per trust tier, which is the right rule for a contradiction
+and blind to agreement: a sponsor letter's applicant independently read on a
+scan, a sponsor id both engines found on different physical pages, or a name
+repeated across scan reads is stronger evidence than whichever value won its
+tier. The second reads individual recognition boxes. The fallback engine detects
+text regions and recognises each crop separately, then joins them into lines so
+the ordinary `Label: value` parsers can work; that join is also lossy, because a
+clean crop beside a row of speckle becomes a line no parser accepts. Keeping the
+per-box confidence and geometry allows a field to be recovered from the box
+alone, gated on high recognition confidence, a label within a bounded edit
+distance, and agreement among every box that qualifies.
+
+Both resolvers are barred from policy by construction rather than by
+convention: they run after the `Record` exists and write only to the printed
+dictionary, and the test suite asserts that the `Record` and the feature vector
+are byte-identical with and without them. Corroboration for a recognition box
+must come from the primary engine, so the fallback engine cannot promote its own
+reading over a primary one through this path.
 
 Applicant identity has a separate output-only repair for the documented
 multiple-applicant trap. When there is no manual correction and the packet has
@@ -183,7 +212,7 @@ unseen corpus.
 ## Failure modes
 
 **Unreadable risk panels dominate the residual error.** `risk_flags` is wrong on
-170 of 1,000 training packets, and 153 of those are cases where the panel could
+167 of 1,000 training packets, and 153 of those are cases where the panel could
 not be read at all and the pipeline emitted nothing. It is the highest-leverage
 field in the corpus: weight 8 in extraction, and an input to the decision path,
 so a miss costs roughly five times its face value.
@@ -250,8 +279,8 @@ The runtime is fully offline with pinned dependencies: PyMuPDF, Tesseract,
 RapidOCR, NumPy, and scikit-learn. No LLM, VLM, cloud OCR service, network
 request, or API key is used. Both figures below are measured, not projected,
 under the submission constraints (`--network none --cpus 4 --memory 8g
---read-only --tmpfs /tmp`): the 1,000 public packets ran in 38m16s, 2.30s per
-PDF, and the 5,000 validation packets in 3h48m, 2.74s per PDF. Both are inside
+--read-only --tmpfs /tmp`): the 1,000 public packets ran in 39m09s, 2.35s per
+PDF, and the 5,000 validation packets in 3h49m, 2.76s per PDF. Both are inside
 the 6s per-PDF budget, and the validation total sits against an 8h20m limit.
 
 The adjudicator must be fitted on evidence extracted **inside the image**. The
