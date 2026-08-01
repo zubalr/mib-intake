@@ -224,6 +224,61 @@ def available_cpus() -> int:
     return os.cpu_count() or 4
 
 
+def apply_box_date(printed: dict[str, str], years: dict) -> None:
+    """Settle a box-recovered arrival date against the corpus year histogram.
+
+    Staged rather than applied at parse time because both branches need the
+    corpus: the strict branch repairs an implausible year onto the observed
+    distribution, and the cheaper branch is only admissible for a date already
+    in the modal year.
+    """
+    from mib.policy import repair_year
+
+    staged = printed.pop("_box_dates", "")
+    if not staged or not years:
+        return
+    modal = max(years, key=years.get)
+    candidates = set()
+    for item in staged.split("|"):
+        branch, _, value = item.partition(":")
+        if branch == "A":
+            candidates.add(repair_year(value, years) or value)
+        elif branch == "B" and value[:4] == modal:
+            candidates.add(value)
+    if len(candidates) == 1:
+        printed["arrival_date"] = next(iter(candidates))
+
+
+def apply_box_sponsors(rows: list[dict], revoked: set[str],
+                       placeholder: str | None) -> int:
+    """Settle box-recovered sponsor ids once the corpus placeholder is known."""
+    from mib.pipeline import BOX_SPONSOR_KEYS
+
+    replaced = 0
+    for row in rows:
+        standard, seen, rescue = (row.pop(key, None)
+                                  for key in BOX_SPONSOR_KEYS)
+        current = str(row.get("sponsor_id", "")).strip().upper()
+        on_placeholder = bool(placeholder) and current == placeholder
+        if on_placeholder:
+            candidate = rescue or standard
+        else:
+            candidate = standard if seen else None
+        if not candidate or candidate == current:
+            continue
+        # Never trade one known-revoked sponsor for another. The packet is
+        # disqualified on either reading, so the substitution buys nothing and
+        # cannot be checked against anything.
+        if current in revoked and candidate in revoked:
+            continue
+        # A rescue from the placeholder must not invent a revocation either.
+        if on_placeholder and candidate in revoked:
+            continue
+        row["sponsor_id"] = candidate
+        replaced += 1
+    return replaced
+
+
 def _enforce_output_schema(rows: list[dict]) -> None:
     """Last line of defence before writing.
 
@@ -300,7 +355,8 @@ def main(argv: list[str] | None = None) -> int:
     # context that a per-packet worker could not see.
     _worker_init()
     assert _LEXICON is not None and _CALIBRATION is not None
-    from mib.pipeline import finalize, resolve_printed_date
+    from mib.pipeline import (BOX_SPONSOR_KEYS, finalize,
+                              resolve_printed_date)
 
     good = [r for r in rows.values() if not r.get("failed")]
     reference = corpus_reference_date([r["record"] for r in good])
@@ -324,9 +380,15 @@ def main(argv: list[str] | None = None) -> int:
             continue
         record = apply_reference_date(row["record"], reference, revoked)
         resolve_printed_date(row["printed"], record, median_date, years)
+        apply_box_date(row["printed"], years)
         final[case_id] = finalize(
             row["printed"], record, row["note"], _CALIBRATION,
             adjudicator=_ADJUDICATOR, features=row.get("features")).to_row()
+        # Carried across `finalize`, which emits only schema fields. Both keys
+        # are removed again by `apply_box_sponsors` before anything is written.
+        for key in BOX_SPONSOR_KEYS:
+            if key in row["printed"]:
+                final[case_id][key] = row["printed"][key]
     rows = final
 
     # Belt and braces: assert one row per input PDF before writing.
@@ -344,6 +406,10 @@ def main(argv: list[str] | None = None) -> int:
         row.pop("_debug", None)
     _enforce_output_schema(ordered)
     sponsor_mode, sponsor_replacements = resolve_fallback_sponsors(ordered)
+    box_sponsors = apply_box_sponsors(ordered, revoked, sponsor_mode)
+    if box_sponsors:
+        print(f"[info] box-recovered sponsor ids: {box_sponsors}",
+              file=sys.stderr)
     if sponsor_replacements:
         print(
             f"[info] corpus sponsor fallback: {sponsor_mode} "

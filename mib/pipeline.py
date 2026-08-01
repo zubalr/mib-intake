@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from mib.extract import (
@@ -429,6 +430,261 @@ def extract_packet(pdf_path: Path, lexicon: Lexicon,
     return assemble(parse_packet(pdf_path), lexicon, promote)
 
 
+# Box-level rescue thresholds. A joined line inherits the confidence of its
+# worst neighbour, so a box read alone must clear a far higher bar than a line:
+# these are recognition scores on a single crop, not corroborated readings.
+_BOX_DATE_STRICT, _BOX_DATE_LABEL = 0.85, 3
+_BOX_DATE_MODAL, _BOX_DATE_MODAL_LABEL = 0.80, 2
+_BOX_CLOSED_MIN, _BOX_CLOSED_LABEL, _BOX_SNAP_MIN = 0.70, 3, 0.20
+_BOX_SPONSOR_MIN, _BOX_SPONSOR_LABEL = 0.90, 2
+_BOX_SPONSOR_PLACEHOLDER, _BOX_SPONSOR_PH_LABEL = 0.70, 3
+
+# Staging keys the box resolver emits for corpus-level finalization. Named once
+# and imported by both consumers: carrying a subset of them silently disables a
+# branch rather than failing, which is not a mistake worth making twice.
+BOX_SPONSOR_KEYS = ("_box_sponsor", "_box_sponsor_seen",
+                    "_box_sponsor_placeholder")
+
+_ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+_SPONSOR_TOKEN_RE = re.compile(r"SPN-\d{4}")
+
+# Label spellings as the recogniser renders them once spacing is gone.
+_BOX_LABELS = {
+    "species_code": ("speciescode", "speciesmatch"),
+    "home_world": ("homeworld",),
+    "visa_class": ("visaclass",),
+    "declared_purpose": ("declaredpurpose", "purpose"),
+}
+
+VALID_VISA = frozenset({"XW-1", "XW-2", "DIP-1", "MED-3", "TRANSIT-7"})
+# A note rationale that names the governing rule outright. The transit class
+# cannot authorise an entry, so a note saying so identifies the class itself.
+_TRANSIT_RATIONALE = "transit class cannot authorize"
+
+
+def _norm(value: str | None) -> str:
+    return " ".join(str(value or "").strip().split()).casefold()
+
+
+def _flag_set(value: str | None) -> set[str]:
+    clean = _norm(value)
+    if clean in ("", "none", "null", "unknown"):
+        return set()
+    return {part.strip() for part in clean.split("|") if part.strip()}
+
+
+def _direct_evidence_repairs(ev: PacketEvidence, printed: dict[str, str],
+                             lexicon: Lexicon) -> None:
+    """Corroboration rules that need more than one observation to see.
+
+    Field resolution picks a single best value per trust tier, which is the
+    right rule for a contradiction but blind to agreement: two independent
+    sources naming the same value is stronger evidence than either alone, and
+    the tier winner may be neither of them. Each rule below requires
+    independent corroboration and is confined to printed output.
+    """
+    def snap_name(value: str) -> str:
+        snapped, confidence = lexicon.snap_name(value)
+        return snapped if confidence > 0.0 else value
+
+    # 1. A sponsor letter's applicant, independently read on a scanned page.
+    sponsor = {_norm(snap_name(o.value)): snap_name(o.value)
+               for o in ev.values("applicant_name") if o.source == SPONSOR}
+    scanned = {_norm(snap_name(o.value))
+               for o in ev.values("applicant_name") if o.source == SCANNED}
+    agreed = set(sponsor) & scanned
+    if len(agreed) == 1 and _norm(printed.get("applicant_name")) != next(iter(agreed)):
+        printed["applicant_name"] = sponsor[next(iter(agreed))]
+        # The mismatch was between two spellings of one applicant, not between
+        # two applicants: that is an identity conflict, not a sponsor conflict.
+        if _flag_set(printed.get("risk_flags")) == {"sponsor_mismatch"}:
+            printed["risk_flags"] = "identity_conflict"
+
+    # 2. A sponsor id both engines read, on different physical pages.
+    primary: dict[str, set[int]] = {}
+    fallback: dict[str, set[int]] = {}
+    display: dict[str, str] = {}
+    for o in ev.values("sponsor_id"):
+        value = o.value.strip().upper()
+        if not _SPONSOR_RE.match(value):
+            continue
+        key = _norm(value)
+        display[key] = value
+        if o.source == SCANNED:
+            primary.setdefault(key, set()).add(o.page)
+        elif o.source == SCANNED_FALLBACK:
+            fallback.setdefault(key, set()).add(o.page)
+    agreed = {key for key in set(primary) & set(fallback)
+              if any(a != b for a in primary[key] for b in fallback[key])}
+    if len(agreed) == 1:
+        printed["sponsor_id"] = display[next(iter(agreed))]
+
+    # 3. A fallback visa only where every primary reading failed validation and
+    #    no typed page states one. Otherwise the trust order already decided.
+    observations = ev.values("visa_class")
+    fallback_visa = {o.value.strip().upper() for o in observations
+                     if o.source == SCANNED_FALLBACK
+                     and o.value.strip().upper() in VALID_VISA}
+    primary_visa = [o for o in observations if o.source == SCANNED]
+    typed_visa = [o for o in observations
+                  if o.source not in (SCANNED, SCANNED_FALLBACK)]
+    if (len(fallback_visa) == 1 and primary_visa and not typed_visa
+            and all(o.value.strip().upper() not in VALID_VISA
+                    for o in primary_visa)):
+        printed["visa_class"] = next(iter(fallback_visa))
+
+    # 4. A note that states the governing class names it.
+    reason = f"{ev.note_reason} {ev.fallback_note_reason}".casefold()
+    if _TRANSIT_RATIONALE in reason:
+        printed["visa_class"] = "TRANSIT-7"
+
+    # 5. Repeated agreement across physical scan reads outweighs one tier winner.
+    counts: dict[str, int] = {}
+    shown: dict[str, str] = {}
+    for o in ev.values("applicant_name"):
+        if o.source not in (SCANNED, SCANNED_FALLBACK):
+            continue
+        value = snap_name(o.value)
+        key = _norm(value)
+        counts[key] = counts.get(key, 0) + 1
+        shown[key] = value
+    if counts:
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0
+        if ranked[0][1] >= runner_up + 2:
+            printed["applicant_name"] = shown[ranked[0][0]]
+
+    # 6. An exact canonical name may replace a fragment nothing can snap.
+    if lexicon.snap_name(printed.get("applicant_name", ""))[1] == 0.0:
+        exact: dict[str, str] = {}
+        for o in ev.values("applicant_name"):
+            if o.source != SCANNED_FALLBACK:
+                continue
+            value, confidence = lexicon.snap_name(o.value)
+            if confidence >= 0.99:
+                exact[_norm(value)] = value
+        if len(exact) == 1:
+            printed["applicant_name"] = next(iter(exact.values()))
+
+
+def _has_typed(ev: PacketEvidence, field: str) -> bool:
+    """Does any non-scan source state this field?
+
+    Every box rule below is gated on this. A recognition box is the weakest
+    evidence in the system; where a typed page states the field, resolution has
+    already seen better and the box has nothing to add.
+    """
+    return any(o.source not in (SCANNED, SCANNED_FALLBACK)
+               for o in ev.values(field))
+
+
+def resolve_direct_boxes(ev: PacketEvidence, printed: dict[str, str],
+                         lexicon: Lexicon) -> None:
+    """Recover fields from individual recognition boxes. Output only.
+
+    Line joining is what normally makes these boxes readable, and it is also
+    what loses them: a clean `Arrival Date: 2026-03-15` crop joined to a row of
+    speckle becomes a line no parser accepts. Reading the box alone recovers it,
+    at the cost of having no corroboration, which is why every rule here demands
+    a high recognition score, a recognisable label, and unanimity among the
+    boxes that qualify.
+
+    Date and sponsor candidates are staged rather than applied, because both
+    need corpus-level facts that only exist once every packet has been read.
+    `mib.cli` finalises them and strips the staging keys.
+    """
+    if not ev.fallback_boxes:
+        return
+
+    # Closed vocabularies: the label and its value share one box, so match both
+    # at once and let the vocabulary reject anything that is not a real value.
+    for field, aliases in _BOX_LABELS.items():
+        if _has_typed(ev, field):
+            continue
+        candidates = set()
+        for _page, text, confidence, _bounds, _centre in ev.fallback_boxes:
+            if confidence < _BOX_CLOSED_MIN:
+                continue
+            canonical = _canon(text)
+            best = None
+            for alias in aliases:
+                lo = max(1, len(alias) - 4)
+                hi = min(len(canonical), len(alias) + 4)
+                for split in range(lo, hi + 1):
+                    distance = weighted_distance(canonical[:split], alias)
+                    if distance > _BOX_CLOSED_LABEL:
+                        continue
+                    value, snapped = lexicon.snap(field, canonical[split:])
+                    if snapped < _BOX_SNAP_MIN:
+                        continue
+                    scored = (distance, -snapped, value)
+                    if best is None or scored < best:
+                        best = scored
+            if best is not None:
+                candidates.add(best[2])
+        if len(candidates) == 1:
+            printed[field] = next(iter(candidates))
+
+    # Dates: shape is checkable, so the gate is recognition quality and label
+    # proximity. Two branches, because a date already in the corpus's modal year
+    # needs no year repair and can therefore be accepted slightly more cheaply.
+    if not _has_typed(ev, "arrival_date"):
+        staged = set()
+        for _page, text, confidence, _bounds, _centre in ev.fallback_boxes:
+            for match in _ISO_DATE_RE.finditer(text):
+                value = match.group(1)
+                try:
+                    date.fromisoformat(value)
+                except ValueError:
+                    continue
+                distance = weighted_distance(_canon(text[:match.start()]),
+                                             "arrivaldate")
+                if confidence >= _BOX_DATE_STRICT and distance <= _BOX_DATE_LABEL:
+                    staged.add(f"A:{value}")
+                elif (confidence >= _BOX_DATE_MODAL
+                      and distance <= _BOX_DATE_MODAL_LABEL):
+                    staged.add(f"B:{value}")
+        if staged:
+            printed["_box_dates"] = "|".join(sorted(staged))
+
+    # Sponsor ids: open vocabulary but a rigid shape. The standard branch also
+    # requires the value to appear in the packet's own observation ledger, so a
+    # box can promote a reading the resolver saw but ranked below another; it
+    # cannot introduce an identifier nothing else read.
+    if not _has_typed(ev, "sponsor_id"):
+        # Corroboration must come from the *primary* engine. These boxes are
+        # RapidOCR output, so treating its own line-level reading as support
+        # would let the fallback engine displace a primary read through the
+        # side door, which is the one guarantee the trust order exists to give.
+        # Where the primary engine read nothing, there is no such read to
+        # protect and the box stands on its confidence alone.
+        primary = {o.value.strip().upper() for o in ev.values("sponsor_id")
+                   if o.source != SCANNED_FALLBACK}
+        standard, placeholder = set(), set()
+        for _page, text, confidence, _bounds, _centre in ev.fallback_boxes:
+            match = _SPONSOR_TOKEN_RE.search(text.upper())
+            if not match:
+                continue
+            prefix = _canon(text[:match.start()])
+            distance = weighted_distance(prefix, "sponsorid")
+            value = match.group(0).upper()
+            if (confidence >= _BOX_SPONSOR_MIN
+                    and distance <= _BOX_SPONSOR_LABEL):
+                standard.add(value)
+            if (confidence >= _BOX_SPONSOR_PLACEHOLDER
+                    and distance <= _BOX_SPONSOR_PH_LABEL):
+                placeholder.add(value)
+        if len(standard) == 1:
+            value = next(iter(standard))
+            printed["_box_sponsor"] = value
+            # Required to displace a resolved value: a box may promote a reading
+            # the primary engine already made, never introduce one it did not.
+            printed["_box_sponsor_seen"] = (
+                "1" if value in primary or not primary else "")
+        if len(placeholder) == 1:
+            printed["_box_sponsor_placeholder"] = next(iter(placeholder))
+
+
 def assemble(ev: PacketEvidence, lexicon: Lexicon,
              promote: frozenset[str] = PROMOTE) -> "Extraction":
     """Turn an evidence set into printable fields plus a policy Record.
@@ -585,6 +841,13 @@ def assemble(ev: PacketEvidence, lexicon: Lexicon,
         printed["_fallback_note"] = ev.fallback_note_finding
     printed["_injection"] = "1" if ev.injection_detected else ""
     printed["_damaged"] = ",".join(sorted(ev.damaged_fields))
+    # Output-only, and deliberately after `record` is built: these read the same
+    # observations the resolver already saw, but combine them across sources in
+    # ways the single-value trust order cannot express. None of them may reach
+    # policy, so they run once the Record is closed and before features, which
+    # are derived from `ev` and `record` rather than from `printed`.
+    _direct_evidence_repairs(ev, printed, lexicon)
+    resolve_direct_boxes(ev, printed, lexicon)
     feats = packet_features(ev, record, promote)
     return Extraction(printed=printed, record=record, note=note, features=feats)
 

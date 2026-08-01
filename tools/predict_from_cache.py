@@ -15,13 +15,15 @@ import argparse
 import json
 from pathlib import Path
 
-from mib.cli import (_enforce_output_schema, corpus_median_date,
+from mib.cli import (_enforce_output_schema, apply_box_date,
+                     apply_box_sponsors, corpus_median_date,
                      corpus_reference_date, fallback_prediction,
                      resolve_fallback_sponsors)
 from mib.lexicon import Lexicon
 from mib.policy import (Calibration, apply_reference_date, corpus_revoked_sponsors,
                         corpus_years)
-from mib.pipeline import finalize, resolve_printed_date
+from mib.pipeline import (BOX_SPONSOR_KEYS, finalize,
+                          resolve_printed_date)
 from tools.build_cache import load_cache
 
 
@@ -42,12 +44,19 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
             continue
         record = apply_reference_date(row["record"], reference, revoked)
         resolve_printed_date(row["printed"], record, median_date, years)
+        apply_box_date(row["printed"], years)
         prediction = finalize(row["printed"], record, row["note"], calibration,
                               adjudicator=adjudicator, features=row.get("features"))
-        out.append(prediction.to_row())
+        emitted = prediction.to_row()
+        # Mirror the CLI: both keys are consumed by `apply_box_sponsors` below.
+        for key in BOX_SPONSOR_KEYS:
+            if key in row["printed"]:
+                emitted[key] = row["printed"][key]
+        out.append(emitted)
 
     _enforce_output_schema(out)
-    resolve_fallback_sponsors(out)
+    sponsor_mode, _replaced = resolve_fallback_sponsors(out)
+    apply_box_sponsors(out, revoked, sponsor_mode)
     return out
 
 

@@ -425,8 +425,10 @@ def _ocr(image: "Image.Image", psm: int, rotation: int = 0) -> str:
 
 
 def read_page(page: "fitz.Page", dpi: int = RENDER_DPI
-              ) -> tuple[list[str], list[str], int]:
-    """OCR one page several ways. Returns (texts, fallback_texts, rotation).
+              ) -> tuple[list[str], list[str], int, list]:
+    """OCR one page several ways.
+
+    Returns (texts, fallback_texts, rotation, fallback_boxes).
 
     Orientation is resolved once with the probe pass. Remaining variants use the
     same orientation, and the caller merges their field candidates.
@@ -438,7 +440,7 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI
     call site has to remember to apply.
     """
     if not _OCR_AVAILABLE:
-        return [], [], 0
+        return [], [], 0, []
 
     renders: dict[int, "Image.Image"] = {dpi: _render(page, dpi)}
 
@@ -471,8 +473,9 @@ def read_page(page: "fitz.Page", dpi: int = RENDER_DPI
                 break
 
     texts.extend(_note_header_reads(renders[dpi], texts))
+    fallback_texts, fallback_boxes = fallback_ocr.read_detailed(renders[dpi])
     return ([t for t in texts if t.strip()],
-            fallback_ocr.read(renders[dpi]), best_rot)
+            fallback_texts, best_rot, fallback_boxes)
 
 
 # Adjudicator notes have no normal field labels, so the orientation probe cannot

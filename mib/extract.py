@@ -207,6 +207,10 @@ class PacketEvidence:
     # amount and waiver code imply. Output-only by construction -- see `assemble`.
     receipt_amount: str | None = None
     receipt_geometry_fee: str | None = None
+    # Per-page RapidOCR recognition boxes: (page, text, confidence, bounds,
+    # centre). Deliberately not observations and not features -- this ledger
+    # feeds one output-only resolver in `mib.pipeline` and nothing else.
+    fallback_boxes: list[tuple] = field(default_factory=list)
     observed_flags: list[str] = field(default_factory=list)
     # Flag-shaped tokens found in free OCR text rather than after an
     # "Observed flags:" label. Kept separate because the label is what licenses
@@ -515,7 +519,16 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
         doc = fitz.open(path)
         try:
             for page_no in scanned_pages:
-                texts, fallback_texts, _rot = ocr_module.read_page(doc[page_no])
+                texts, fallback_texts, _rot, boxes = ocr_module.read_page(
+                    doc[page_no])
+                if boxes:
+                    # Kept out of `observations` on purpose. These are raw
+                    # recognition boxes with no label parsed and no trust rank,
+                    # so they must not enter resolution or the feature vector;
+                    # a separate ledger is what keeps that structural.
+                    ev.fallback_boxes.extend(
+                        (page_no, box.text, box.confidence, box.bounds,
+                         box.centre) for box in boxes)
                 if not texts and not fallback_texts:
                     continue
                 ev.ocr_pages += 1

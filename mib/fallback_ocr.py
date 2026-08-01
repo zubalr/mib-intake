@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 
 try:
     import numpy as np
@@ -154,6 +155,60 @@ def _normalise(line: str) -> str:
     return _respace(line[: sep.start()]) + line[sep.start():]
 
 
+@dataclass(frozen=True)
+class BoxRead:
+    """One recognition box, kept before line joining discards what it knows.
+
+    `_lines` exists to rebuild `Label: value` rows the detector split apart, and
+    it is the right default. But joining is lossy in two ways that matter: the
+    per-crop confidence is averaged away into a line that may be mostly noise,
+    and a box whose neighbours are debris inherits their company. A box that
+    reads cleanly on its own is evidence in its own right.
+    """
+
+    text: str
+    confidence: float
+    # x0, y0, x1, y1 of the detected quadrilateral's bounding box.
+    bounds: tuple[float, float, float, float]
+    centre: tuple[float, float]
+
+
+def _box_reads(result) -> list[BoxRead]:
+    reads: list[BoxRead] = []
+    for box, text, confidence in result:
+        confidence = float(confidence)
+        if confidence < _MIN_CONFIDENCE or not text.strip():
+            continue
+        xs = [point[0] for point in box]
+        ys = [point[1] for point in box]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        reads.append(BoxRead(
+            text=text.strip(),
+            confidence=confidence,
+            bounds=(x0, y0, x1, y1),
+            centre=((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+        ))
+    return reads
+
+
+def read_detailed(image) -> tuple[list[str], list[BoxRead]]:
+    """Line readings as before, plus the boxes they were assembled from."""
+    if not _AVAILABLE:
+        return [], []
+    try:
+        result, _elapsed = _engine()(np.array(image.convert("RGB")))
+    except Exception:  # noqa: BLE001 - a failed page must not kill the packet
+        return [], []
+    result = result or []
+    boxes = _box_reads(result)
+    lines = _lines(result)
+    if not lines:
+        return [], boxes
+    raw = "\n".join(lines)
+    repaired = "\n".join(_normalise(line) for line in lines)
+    return ([raw] if repaired == raw else [raw, repaired]), boxes
+
+
 def read(image) -> list[str]:
     """Read one already-rendered page. Returns zero, one, or two readings.
 
@@ -161,15 +216,4 @@ def read(image) -> list[str]:
     independently and their candidates merged, so a value that only survives in
     one of them is still recovered.
     """
-    if not _AVAILABLE:
-        return []
-    try:
-        result, _elapsed = _engine()(np.array(image.convert("RGB")))
-    except Exception:  # noqa: BLE001 - a failed page must not kill the packet
-        return []
-    lines = _lines(result or [])
-    if not lines:
-        return []
-    raw = "\n".join(lines)
-    repaired = "\n".join(_normalise(line) for line in lines)
-    return [raw] if repaired == raw else [raw, repaired]
+    return read_detailed(image)[0]

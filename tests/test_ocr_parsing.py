@@ -107,7 +107,7 @@ class TestInjectionSurvivesOCR:
             import pytest
             pytest.skip("tesseract not installed")
         doc = fitz.open(self._probe(tmp_path))
-        primary, fallback, _rotation = ocr.read_page(doc[0])
+        primary, fallback, _rotation, _boxes = ocr.read_page(doc[0])
         blob = " ".join([*primary, *fallback]).casefold()
         doc.close()
         assert "observed flag" in blob, "the visible line should be read"
