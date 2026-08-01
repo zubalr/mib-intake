@@ -507,7 +507,7 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
         #
         # Triggering on "almost no text at all" is not enough: a scanned page
         # often keeps a crisp text-layer title and header ("MIB Fee Receipt",
-        # "<case id> | MIB Eyes Only") while every *value* exists only as
+        # "MIB-000003 | MIB Eyes Only") while every *value* exists only as
         # pixels. Those pages have 2+ text spans, so a sparse-text trigger skips
         # them -- which silently lost ~400 fee_status values.
         produced_values = len(ev.observations) > before
