@@ -163,6 +163,38 @@ def corpus_median_date(records) -> str | None:
     return dates[len(dates) // 2].isoformat()
 
 
+def resolve_fallback_sponsors(rows: list[dict]) -> tuple[str | None, int]:
+    """Replace output-only sponsor placeholders with the current corpus mode.
+
+    The placeholder is necessary while packets are processed independently,
+    but once the corpus is available it is a dominated final guess: an observed
+    sponsor has some chance of matching, while the reserved placeholder carries
+    no document evidence. This pass is deliberately output-only and therefore
+    cannot affect revocation policy or adjudication.
+    """
+    import re
+    from collections import Counter
+
+    sponsor_re = re.compile(r"SPN-\d{4}\Z")
+    counts = Counter(
+        str(row.get("sponsor_id", ""))
+        for row in rows
+        if str(row.get("sponsor_id", "")) != FALLBACK_SPONSOR_ID
+        and sponsor_re.fullmatch(str(row.get("sponsor_id", "")))
+    )
+    if not counts:
+        return None, 0
+
+    # Stable lexical tie-break keeps predictions deterministic.
+    mode = min(counts, key=lambda value: (-counts[value], value))
+    replaced = 0
+    for row in rows:
+        if row.get("sponsor_id") == FALLBACK_SPONSOR_ID:
+            row["sponsor_id"] = mode
+            replaced += 1
+    return mode, replaced
+
+
 def available_cpus() -> int:
     """CPU count the container is actually allowed to use.
 
@@ -311,6 +343,13 @@ def main(argv: list[str] | None = None) -> int:
     for row in ordered:
         row.pop("_debug", None)
     _enforce_output_schema(ordered)
+    sponsor_mode, sponsor_replacements = resolve_fallback_sponsors(ordered)
+    if sponsor_replacements:
+        print(
+            f"[info] corpus sponsor fallback: {sponsor_mode} "
+            f"({sponsor_replacements} rows)",
+            file=sys.stderr,
+        )
 
     output = Path(args.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)

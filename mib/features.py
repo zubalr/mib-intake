@@ -37,6 +37,35 @@ from mib.policy import (
 _CALIBRATION: Calibration | None = None
 
 
+def adjudicator_feature_allowed(name: str) -> bool:
+    """Whether a document feature belongs in the learned adjudicator.
+
+    The policy prior already summarizes the active decision path. Feeding the
+    model the path one-hot again, together with sparse field/flag indicators,
+    gave a small training set two redundant ways to memorize the same state.
+    Repeated paired out-of-fold ablation favored the smaller representation.
+    Extraction and deterministic policy still retain every underlying signal.
+    """
+    if name.startswith("path__"):
+        return False
+    if name.startswith("known_") and name not in {
+        "known_field_count",
+        "known_field_frac",
+    }:
+        return False
+    if name.startswith("flag_") or name in {
+        "n_flags",
+        "n_review_flags",
+        "has_disqualifying",
+    }:
+        return False
+    return name not in {
+        "n_corrections",
+        "has_diplomatic_note",
+        "has_hardship_waiver",
+    }
+
+
 def _prior() -> Calibration:
     """The fitted path table, loaded once per process."""
     global _CALIBRATION
@@ -100,6 +129,8 @@ def packet_features(ev: PacketEvidence, record: Record,
     """
     policy_trust_max = (TRUST_ORDER[SCANNED_FALLBACK] if "fields" in promote
                         else POLICY_TRUST_MAX)
+    show_trust_max = (TRUST_ORDER[SCANNED_FALLBACK] if "printed" in promote
+                      else POLICY_TRUST_MAX)
     flags = record.flag_set()
     feats: dict[str, float] = {}
 
@@ -123,10 +154,12 @@ def packet_features(ev: PacketEvidence, record: Record,
     feats["known_field_frac"] = known / len(SCORED_FIELDS)
     # Coverage the fallback engine added on top, as its own signal: a packet
     # that needed the second engine is a differently-conditioned packet.
-    feats["fallback_recovered"] = float(sum(
-        1 for field in SCORED_FIELDS
-        if not feats[f"known_{field}"]
-        and any(o.trusted for o in ev.values(field))))
+    if "printed" in promote:
+        feats["fallback_recovered"] = float(sum(
+            1 for field in SCORED_FIELDS
+            if not feats[f"known_{field}"]
+            and any(o.trusted and o.trust <= show_trust_max
+                    for o in ev.values(field))))
     # "Did we read the fee status" is not "is it a value other than unknown".
     # A receipt that states `unknown` was read perfectly; treating those 45
     # packets as unreadable is the same sentinel collision the decision path
@@ -138,8 +171,12 @@ def packet_features(ev: PacketEvidence, record: Record,
     # Corroboration across independent sources.
     total_obs = agree = conflict = 0
     for field in SCORED_FIELDS:
-        values = {o.value.casefold() for o in ev.values(field) if o.trusted}
-        count = len([o for o in ev.values(field) if o.trusted])
+        observations = [
+            o for o in ev.values(field)
+            if o.trusted and o.trust <= policy_trust_max
+        ]
+        values = {o.value.casefold() for o in observations}
+        count = len(observations)
         total_obs += count
         if count > 1:
             agree += int(len(values) == 1)
@@ -163,7 +200,7 @@ def packet_features(ev: PacketEvidence, record: Record,
     feats["risk_panel_missing"] = float(panel_missing)
     feats["risk_panel_read"] = float(panel_read)
     biometric = ev.biometric_confidence
-    if biometric is None and "fields" in promote:
+    if biometric is None and "singletons" in promote:
         biometric = ev.fallback_biometric_confidence
     # -1 encodes "not printed", which is distinct from a genuine low score.
     feats["biometric_confidence"] = biometric if biometric is not None else -1.0

@@ -30,8 +30,15 @@ from mib.lexicon import Lexicon
 from mib.pipeline import assemble
 
 # Files whose contents change what extraction produces.
-EXTRACTION_SOURCES = ("extract.py", "ocr.py", "pdfio.py", "lexicon.py",
-                      "features.py", "pipeline.py")
+EXTRACTION_SOURCES = (
+    "extract.py",
+    "fallback_ocr.py",
+    "features.py",
+    "lexicon.py",
+    "ocr.py",
+    "pdfio.py",
+    "pipeline.py",
+)
 
 _LEX: Lexicon | None = None
 

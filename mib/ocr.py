@@ -147,22 +147,33 @@ _WAIVER_CODE_RE = re.compile(r"(?i)wa[il1]ver\s*c[o0]de\W{0,4}([A-Za-z0-9\-/]{2,
 _NO_WAIVER = frozenset({"N/A", "NA", "NONE", "N/4", "WA"})
 
 
+def fee_from_amount_and_waiver(amount_text: str, waiver_text: str) -> str | None:
+    """Fee status implied by a receipt's amount and waiver code.
+
+    Shared rather than duplicated: the scanned path reaches this after regex
+    mining, the typed path hands over two parsed label values. Two copies of
+    "what does this receipt mean" is precisely how the typed branch ended up
+    reading `Amount` and discarding it while the scanned branch used it.
+    """
+    try:
+        amount = float(str(amount_text).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    waived = str(waiver_text).strip().upper() not in _NO_WAIVER
+    if amount > 0 and not waived:
+        return "paid"
+    if amount == 0 and waived:
+        return "waived"
+    return None
+
+
 def _fee_from_receipt(text: str) -> str | None:
     """Fee status implied by the amount and waiver code on a receipt."""
     amount_match = _AMOUNT_RE.search(text)
     waiver_match = _WAIVER_CODE_RE.search(text)
     if not amount_match or not waiver_match:
         return None
-    try:
-        amount = float(amount_match.group(1).replace(",", ""))
-    except ValueError:
-        return None
-    waived = waiver_match.group(1).strip().upper() not in _NO_WAIVER
-    if amount > 0 and not waived:
-        return "paid"
-    if amount == 0 and waived:
-        return "waived"
-    return None
+    return fee_from_amount_and_waiver(amount_match.group(1), waiver_match.group(1))
 
 
 # A signed note reason can also state fee status or home world explicitly.

@@ -133,7 +133,10 @@ def _respace(head: str) -> str:
     engine, and doing it by exact match means it can never invent a label.
     """
     flat = re.sub(r"[^a-z]", "", head.casefold())
-    for stripped, label in _flat_labels().items():
+    # Longest label first, so `speciescode` resolves to "species code" rather
+    # than to the bare "species" alias that is also a suffix of it.
+    for stripped, label in sorted(_flat_labels().items(),
+                                  key=lambda kv: -len(kv[0])):
         if flat.endswith(stripped):
             # The label alone, dropping whatever preceded it: `_match_label`
             # reads the trailing words and ignores leading scan furniture, so

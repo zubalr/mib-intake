@@ -16,3 +16,12 @@ joblib==1.5.3
 # scikit-learn and reintroduce the same silent mismatch.
 scipy==1.18.0
 threadpoolctl==3.6.0
+# Independent OCR fallback for unresolved raster fields.
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.28.0
+opencv-python==5.0.0.93
+pyclipper==1.4.0
+Shapely==2.1.2
+PyYAML==6.0.3
+six==1.17.0
+tqdm==4.70.0

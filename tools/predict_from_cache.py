@@ -16,7 +16,8 @@ import json
 from pathlib import Path
 
 from mib.cli import (_enforce_output_schema, corpus_median_date,
-                     corpus_reference_date, fallback_prediction)
+                     corpus_reference_date, fallback_prediction,
+                     resolve_fallback_sponsors)
 from mib.lexicon import Lexicon
 from mib.policy import (Calibration, apply_reference_date, corpus_revoked_sponsors,
                         corpus_years)
@@ -46,6 +47,7 @@ def build_rows(cache: dict, calibration: Calibration, lexicon: Lexicon,
         out.append(prediction.to_row())
 
     _enforce_output_schema(out)
+    resolve_fallback_sponsors(out)
     return out
 
 

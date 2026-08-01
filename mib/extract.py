@@ -127,6 +127,14 @@ CORRECTION_SUBJECTS = {
 }
 
 NOTE_RE = re.compile(r"Finding:\s*([A-Z_]+)\.\s*Reason:\s*(.*)", re.I)
+# `NOTE_RE` is matched against one span at a time, so a reason clause that wraps
+# onto the following line is silently truncated. The same pattern over a whole
+# page recovers the continuation; `re.S` is the entire difference.
+NOTE_PAGE_RE = re.compile(r"Finding:\s*([A-Z_]+)\.\s*Reason:\s*(.*)", re.I | re.S)
+# A reason clause can also state the rescission outright instead of naming the
+# flag token, and the sentence is itself the policy fact rather than a paraphrase
+# of one.
+RESCINDED_RE = re.compile(r"\bprior denial stamp rescinded\b", re.I)
 SPONSOR_ATTEST_RE = re.compile(
     r"Sponsor\s+(SPN-\d{4})\s+attests that\s+(.+?)\s+is expected on Earth for\s+(.+?)\.",
     re.S,
@@ -195,11 +203,19 @@ class PacketEvidence:
     # Cross-document facts used by the policy layer.
     registry_status: str | None = None
     waiver_code: str | None = None
+    # Typed-receipt geometry: the amount as printed, and the fee status the
+    # amount and waiver code imply. Output-only by construction -- see `assemble`.
+    receipt_amount: str | None = None
+    receipt_geometry_fee: str | None = None
     observed_flags: list[str] = field(default_factory=list)
     # Flag-shaped tokens found in free OCR text rather than after an
     # "Observed flags:" label. Kept separate because the label is what licenses
     # aggressive truncation matching -- see Lexicon.snap_flag.
     flag_candidates: list[str] = field(default_factory=list)
+    # Flag tokens read from the part of a typed note's reason clause that falls
+    # below the first span. Staged rather than merged on sight: whether the
+    # packet carries an injection is only settled once every page has been read.
+    note_continuation_flags: list[str] = field(default_factory=list)
     sponsor_letter_sponsor: str | None = None
     sponsor_letter_name: str | None = None
     sponsor_letter_class: str | None = None
@@ -463,6 +479,19 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
                             TRUST_ORDER[MANUAL_CORRECTION], page_no)
                     ev.corrections[target] = _clean(correction.group(2))
 
+        # The per-span pass above stops the reason clause at the first line. Read
+        # the page as one blob to recover the rest of it. Only flag names are
+        # taken: the verdict and the field facts were already settled from the
+        # first span, and widening those was never measured.
+        if kind == ADJUDICATOR:
+            blob = "\n".join(_clean(s.text) for s in visible if s.text.strip())
+            full = NOTE_PAGE_RE.search(blob)
+            if full:
+                ev.note_continuation_flags.extend(
+                    ocr_module.mine_flag_candidates(full.group(2)))
+                if RESCINDED_RE.search(full.group(2)):
+                    ev.note_continuation_flags.append("rescinded_denial")
+
         before = len(ev.observations)
         _parse_labelled_fields(ev, visible, kind, trust, page_no)
         _parse_inline_fields(ev, visible, kind, trust, page_no)
@@ -521,6 +550,19 @@ def parse_packet(pdf_path: Path | str) -> PacketEvidence:
     if ev.non_evidentiary_texts:
         ev.injection_detected = True
 
+    # A note's continuation becomes evidence only on a packet with no injection
+    # signal, which is the same boundary the fallback finding already respects in
+    # `mib.pipeline`. Adding a flag cannot manufacture an approval, but a spoofed
+    # one could still deny a clean packet, so the guard is worth its cost.
+    if not ev.injection_detected:
+        ev.flag_candidates.extend(ev.note_continuation_flags)
+
+    # Both halves of the receipt geometry are only in hand once every page has
+    # been parsed, since the amount and the waiver code need not share a page.
+    if ev.receipt_amount is not None and ev.waiver_code is not None:
+        ev.receipt_geometry_fee = ocr_module.fee_from_amount_and_waiver(
+            ev.receipt_amount, ev.waiver_code)
+
     return ev
 
 
@@ -534,7 +576,12 @@ def _record(ev: PacketEvidence, field_name: str, value: str, kind: str,
     # invalid sponsor_id or arrival_date makes the whole row fail the official
     # validator.
     if not valid_for_field(field_name, value):
-        ev.damaged_fields.add(field_name)
+        # The primary parser uses invalid OCR as evidence that the printed
+        # field itself was damaged. The fallback engine is only a second read
+        # of that same raster, though, and its debris must not rewrite document
+        # condition or the model features when fallback promotion is disabled.
+        if kind != SCANNED_FALLBACK:
+            ev.damaged_fields.add(field_name)
         return
     ev.observations.append(Observation(field_name, value, kind, page, trust))
 
@@ -558,6 +605,10 @@ def _parse_labelled_fields(ev: PacketEvidence, visible: list[Span], kind: str,
             ev.registry_status = value
         elif target == "_waiver_code":
             ev.waiver_code = value
+        elif target == "_amount":
+            # Parsed and dropped until now, while the scanned path derived a fee
+            # status from the same two numbers.
+            ev.receipt_amount = value
         elif target.startswith("_"):
             continue
         else:
