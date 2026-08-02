@@ -4,10 +4,10 @@
 
 | Section | Training set | Model-fold diagnostic |
 | --- | ---: | ---: |
-| Extraction | 45.31 / 50 | 45.31 / 50 |
+| Extraction | 45.37 / 50 | 45.37 / 50 |
 | Classification | 74.45 / 80 | 68.82 / 80 |
 | Calibration | 18.07 / 20 | 16.81 / 20 |
-| Total | **137.83 / 150** | 130.62 / 150, SE 0.12 |
+| Total | **137.89 / 150** | 130.62 / 150, SE 0.12 |
 | Mean confidence Brier | 0.0482 | 0.0797 |
 | Catastrophic false approvals | 12 | 20.6 |
 
@@ -120,6 +120,18 @@ dictionary, and the test suite asserts that the `Record` and the feature vector
 are byte-identical with and without them. Corroboration for a recognition box
 must come from the primary engine, so the fallback engine cannot promote its own
 reading over a primary one through this path.
+
+A newer generation of the same recogniser family, PP-OCRv6 Small, runs last and
+only where the pipeline resolved nothing at all and a corpus prior would
+otherwise be printed. It is kept as a separate session rather than a
+replacement, so the readings the pipeline already trusts are never re-litigated
+by a second model and a regression in one generation cannot rewrite the other's
+output. A field is filled only when every qualifying candidate in the packet
+agrees, and only when the value survives the same structural checks any other
+reading faces: a name must land exactly on the roster, a closed vocabulary must
+snap, a sponsor id must match its shape. On packets carrying an injection signal
+it does not run. Its worst case is therefore replacing one guess with another,
+and it recovered 11 fields with no regressions for about 0.15 seconds per PDF.
 
 Applicant identity has a separate output-only repair for the documented
 multiple-applicant trap. When there is no manual correction and the packet has

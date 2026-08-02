@@ -209,6 +209,61 @@ def read_detailed(image) -> tuple[list[str], list[BoxRead]]:
     return ([raw] if repaired == raw else [raw, repaired]), boxes
 
 
+# A newer generation of the same detector/recogniser family, kept as a separate
+# session rather than a replacement. It is run only where ordinary resolution
+# left a field with nothing, so the readings the pipeline already trusts are
+# never re-litigated by a second engine, and a regression in one generation
+# cannot silently rewrite the other's output.
+_V6_ENGINE = None
+_V6_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "policy")
+_V6_DET = os.path.join(_V6_DIR, "ppocrv6_det.onnx")
+_V6_REC = os.path.join(_V6_DIR, "ppocrv6_rec.onnx")
+
+
+def v6_available() -> bool:
+    if os.environ.get("MIB_DISABLE_V6"):
+        return False
+    return _AVAILABLE and os.path.exists(_V6_DET) and os.path.exists(_V6_REC)
+
+
+def _v6_engine():
+    global _V6_ENGINE
+    if _V6_ENGINE is None:
+        _V6_ENGINE = RapidOCR(
+            det_model_path=_V6_DET,
+            rec_model_path=_V6_REC,
+            use_cls=False,
+            text_score=0.50,
+            intra_op_num_threads=_THREADS,
+            inter_op_num_threads=_THREADS,
+        )
+    return _V6_ENGINE
+
+
+def read_v6(image) -> tuple[list[str], list[BoxRead]]:
+    """Second-generation read of one raster: line variants plus raw boxes.
+
+    Both are returned for the same reason the first engine returns both. The
+    joined lines are what the ordinary `Label: value` parsers understand, and
+    the boxes survive the cases where joining ruins an otherwise clean crop.
+    """
+    if not v6_available():
+        return [], []
+    try:
+        result, _elapsed = _v6_engine()(np.array(image.convert("RGB")))
+    except Exception:  # noqa: BLE001 - a failed page must not kill the packet
+        return [], []
+    result = result or []
+    boxes = _box_reads(result)
+    lines = _lines(result)
+    if not lines:
+        return [], boxes
+    raw = "\n".join(lines)
+    repaired = "\n".join(_normalise(line) for line in lines)
+    return ([raw] if repaired == raw else [raw, repaired]), boxes
+
+
 def read(image) -> list[str]:
     """Read one already-rendered page. Returns zero, one, or two readings.
 

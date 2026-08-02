@@ -27,7 +27,7 @@ from pathlib import Path
 
 from mib.extract import parse_packet
 from mib.lexicon import Lexicon
-from mib.pipeline import assemble
+from mib.pipeline import assemble, fill_unresolved_from_second_engine
 
 # Files whose contents change what extraction produces.
 EXTRACTION_SOURCES = (
@@ -72,6 +72,11 @@ def _one(pdf: str) -> dict:
     try:
         ev = parse_packet(Path(pdf))
         ex = assemble(ev, _LEX)
+        # The CLI settles unresolved fields with a second recogniser after
+        # assembly. Doing the same here keeps the cache identical to what the
+        # image produces; assembling alone would quietly measure a different
+        # pipeline from the one that ships.
+        fill_unresolved_from_second_engine(ev, ex.printed, _LEX, Path(pdf))
         row = {"case_id": case_id, "printed": ex.printed, "record": ex.record,
                "note": ex.note, "features": ex.features, "failed": False}
         if _KEEP_EVIDENCE:

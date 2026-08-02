@@ -8,11 +8,11 @@ JSONL prediction per packet. Each prediction contains nine extracted fields,
 an `APPROVED`, `DENIED`, or `NEEDS_REVIEW` decision, and a calibrated
 confidence.
 
-On the public training set the image scores **137.83 / 150**.
+On the public training set the image scores **137.89 / 150**.
 
 | Section | Training set |
 | --- | ---: |
-| Extraction | 45.31 / 50 |
+| Extraction | 45.37 / 50 |
 | Classification | 74.45 / 80 |
 | Calibration | 18.07 / 20 |
 | Mean confidence Brier | 0.0482 |
@@ -123,7 +123,9 @@ MIT. See [LICENSE](LICENSE).
 Third-party components are used unmodified, as pinned dependencies: Tesseract
 and pytesseract (Apache-2.0); `rapidocr-onnxruntime` (Apache-2.0), which bundles
 the PaddleOCR PP-OCRv4 detection, classification and recognition weights
-(Apache-2.0); ONNX Runtime (MIT); OpenCV (Apache-2.0); PyMuPDF (AGPL-3.0 or
-Artifex commercial); Pillow (MIT-CMU); and scikit-learn, NumPy and SciPy
-(BSD-3-Clause). No source, thresholds, tables, or predictions from another
-challenge entrant are used.
+(Apache-2.0); the PaddleOCR PP-OCRv6 Small English detection and recognition
+weights (Apache-2.0), redistributed by the RapidOCR project and vendored in
+`policy/` so the runtime stays offline; ONNX Runtime (MIT); OpenCV (Apache-2.0);
+PyMuPDF (AGPL-3.0 or Artifex commercial); Pillow (MIT-CMU); and scikit-learn,
+NumPy and SciPy (BSD-3-Clause). No source, thresholds, tables, models, or
+predictions from another challenge entrant are used.

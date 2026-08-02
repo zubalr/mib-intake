@@ -427,7 +427,14 @@ PROMOTE: frozenset[str] = frozenset({"printed", "fee"})
 def extract_packet(pdf_path: Path, lexicon: Lexicon,
                    promote: frozenset[str] = PROMOTE) -> "Extraction":
     """Phase 1: read a packet into printable fields plus a policy Record."""
-    return assemble(parse_packet(pdf_path), lexicon, promote)
+    ev = parse_packet(pdf_path)
+    extraction = assemble(ev, lexicon, promote)
+    # Only now is it known which fields nothing could resolve, so this is the
+    # first point at which a second engine has a defined job. Running it here
+    # rather than during extraction also keeps it off the packets that need
+    # nothing, which is most of them.
+    fill_unresolved_from_second_engine(ev, extraction.printed, lexicon, pdf_path)
+    return extraction
 
 
 # Box-level rescue thresholds. A joined line inherits the confidence of its
@@ -567,6 +574,119 @@ def _direct_evidence_repairs(ev: PacketEvidence, printed: dict[str, str],
             printed["applicant_name"] = next(iter(exact.values()))
 
 
+_V6_FIELDS = ("applicant_name", "species_code", "home_world", "visa_class",
+              "declared_purpose", "sponsor_id")
+_V6_LABELS = {
+    "applicant_name": ("applicant", "registryname"),
+    "species_code": ("speciescode", "speciesmatch"),
+    "home_world": ("homeworld",),
+    "visa_class": ("visaclass",),
+    "declared_purpose": ("declaredpurpose", "purpose"),
+    "sponsor_id": ("sponsorid",),
+}
+_V6_LABEL_MAX = 3
+
+
+def _v6_canonical(field: str, value: str, lexicon: Lexicon) -> str | None:
+    """Accept a second-engine reading only if it is a real value for its field.
+
+    The thresholds differ by how much structure the field has to check against.
+    A name has to land exactly on the roster, a closed vocabulary only has to
+    snap, and a sponsor id has to match its shape outright.
+    """
+    value = str(value).strip()
+    if not value:
+        return None
+    if field == "applicant_name":
+        snapped, confidence = lexicon.snap_name(value)
+        return snapped if confidence >= 0.99 else None
+    if field in SNAP_FIELDS:
+        snapped, confidence = lexicon.snap(field, value)
+        return snapped if confidence >= _BOX_SNAP_MIN else None
+    if field == "sponsor_id":
+        value = value.upper()
+        return value if _SPONSOR_RE.match(value) else None
+    return None
+
+
+def fill_unresolved_from_second_engine(ev: PacketEvidence,
+                                       printed: dict[str, str],
+                                       lexicon: Lexicon,
+                                       pdf_path: Path) -> None:
+    """Offer a newer recogniser only the fields nothing else could read.
+
+    Strictly fill-only. It never contests a value the pipeline resolved, never
+    reaches the `Record`, and runs only where a corpus prior would otherwise be
+    printed, so its worst case is replacing one guess with another. Every
+    qualifying box in the packet must agree before a field is filled.
+    """
+    from mib import fallback_ocr
+
+    unresolved = {f for f in printed.pop("_unresolved", "").split(",") if f}
+    eligible = [f for f in _V6_FIELDS
+                if f in unresolved and f not in ev.damaged_fields]
+    if not eligible or ev.injection_detected or not fallback_ocr.v6_available():
+        return
+
+    pages = sorted({page for page, *_ in ev.fallback_boxes})
+    if not pages:
+        return
+
+    candidates: dict[str, set[str]] = {field: set() for field in eligible}
+    try:
+        import fitz
+
+        from mib.extract import (FALLBACK_CONTRIBUTIONS, PacketEvidence,
+                                 SCANNED_FALLBACK, _absorb)
+        from mib.ocr import _render
+
+        # Parse the second engine's output with the same label machinery the
+        # first one uses, into scratch evidence that never reaches the packet.
+        # Reusing those parsers rather than writing a second matcher is the
+        # point: they already handle the separators, clipped labels and glyph
+        # confusions this corpus produces.
+        scratch = PacketEvidence(case_id=ev.case_id)
+        seen: set[tuple[str, str]] = set()
+        with fitz.open(pdf_path) as doc:
+            for page_no in pages:
+                if page_no >= len(doc):
+                    continue
+                texts, boxes = fallback_ocr.read_v6(_render(doc[page_no], 200))
+                if texts:
+                    _absorb(scratch, texts, page_no, SCANNED_FALLBACK, seen,
+                            FALLBACK_CONTRIBUTIONS)
+                for box in boxes:
+                    canonical = _canon(box.text)
+                    for field in eligible:
+                        for alias in _V6_LABELS[field]:
+                            lo = max(1, len(alias) - 4)
+                            hi = min(len(canonical), len(alias) + 4)
+                            hit = None
+                            for split in range(lo, hi + 1):
+                                if weighted_distance(canonical[:split],
+                                                     alias) > _V6_LABEL_MAX:
+                                    continue
+                                value = _v6_canonical(
+                                    field, box.text[split:], lexicon)
+                                if value is not None:
+                                    hit = value
+                                    break
+                            if hit is not None:
+                                candidates[field].add(hit)
+                                break
+        for field in eligible:
+            for observation in scratch.values(field):
+                value = _v6_canonical(field, observation.value, lexicon)
+                if value is not None:
+                    candidates[field].add(value)
+    except Exception:  # noqa: BLE001 - a second opinion must never fail a packet
+        return
+
+    for field, values in candidates.items():
+        if len(values) == 1:
+            printed[field] = next(iter(values))
+
+
 def _has_typed(ev: PacketEvidence, field: str) -> bool:
     """Does any non-scan source state this field?
 
@@ -702,6 +822,11 @@ def assemble(ev: PacketEvidence, lexicon: Lexicon,
     """
     resolved: dict[str, str] = {}
     printed: dict[str, str] = {}
+    # Fields for which nothing could be resolved and a corpus prior was printed
+    # instead. Recorded rather than inferred: a field can legitimately resolve
+    # *to* the prior, and a second engine must only be offered the ones where
+    # the pipeline genuinely read nothing.
+    unresolved: set[str] = set()
     fallback = TRUST_ORDER[SCANNED_FALLBACK]
     # Three separate ceilings, because printing a value, letting it settle a
     # field the policy reads, and letting it settle the fee that selects the
@@ -735,6 +860,7 @@ def assemble(ev: PacketEvidence, lexicon: Lexicon,
             continue
 
         # No trusted evidence: print a prior guess but keep it UNKNOWN for policy.
+        unresolved.add(field)
         if field == "applicant_name":
             printed[field] = lexicon.data["applicant_name"]["prior_mode"]
         elif field == "sponsor_id":
@@ -755,6 +881,8 @@ def assemble(ev: PacketEvidence, lexicon: Lexicon,
     # Print what the document said, including a stated "unknown" -- guessing the
     # prior mode there overwrites a correct value with `paid`. The fallback is
     # only for fields nothing trustworthy stated.
+    if not shown_fee:
+        unresolved.add("fee_status")
     printed["fee_status"] = shown_fee or lexicon.prior_mode("fee_status")
     # A typed receipt states its amount and waiver code as plainly as its status
     # line, and the scanned path has always read them. Printed only, on purpose:
@@ -846,8 +974,20 @@ def assemble(ev: PacketEvidence, lexicon: Lexicon,
     # ways the single-value trust order cannot express. None of them may reach
     # policy, so they run once the Record is closed and before features, which
     # are derived from `ev` and `record` rather than from `printed`.
+    before_repairs = {field: printed.get(field) for field in unresolved}
     _direct_evidence_repairs(ev, printed, lexicon)
     resolve_direct_boxes(ev, printed, lexicon)
+    # Anything the two resolvers above settled is no longer unresolved, and a
+    # staged box candidate counts as settled even though it is applied later.
+    unresolved -= {field for field, was in before_repairs.items()
+                   if printed.get(field) != was}
+    if "_box_dates" in printed:
+        unresolved.discard("arrival_date")
+    if any(key in printed for key in BOX_SPONSOR_KEYS):
+        unresolved.discard("sponsor_id")
+    if ev.receipt_geometry_fee:
+        unresolved.discard("fee_status")
+    printed["_unresolved"] = ",".join(sorted(unresolved))
     feats = packet_features(ev, record, promote)
     return Extraction(printed=printed, record=record, note=note, features=feats)
 
