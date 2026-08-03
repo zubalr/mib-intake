@@ -84,6 +84,7 @@ request, or API key.
 | `policy/` | Fitted lexicon, calibration, and model artifacts |
 | `tools/` | Training, validation, and release checks |
 | `tests/` | Unit and end-to-end tests |
+| `APPENDIX.md` | Extended engineering detail behind the memo |
 
 ## Development
 
