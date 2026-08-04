@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -144,6 +145,17 @@ def main() -> None:
     ap.add_argument("--oof-out", type=Path, default=None,
                     help="Write predictions.jsonl built from "
                          "out-of-fold probabilities, for official scoring.")
+    ap.add_argument("--pin", metavar="ESTIMATOR:BLEND", default=None,
+                    help="Ship this configuration instead of the one the "
+                         "one-standard-error rule reaches, e.g. "
+                         "`hgb_shallow:0.65`. The table is still printed and "
+                         "the guard against the path baseline still applies. "
+                         "For when the candidates are inside one standard "
+                         "error on this 100-point proxy and the choice was "
+                         "therefore made on the full 150-point objective "
+                         "instead (scratch/oof_full_objective.py), which sees "
+                         "extraction, the note-settled packets, and the "
+                         "catastrophic-false-approval count.")
     args = ap.parse_args()
 
     with open(args.labels, newline="") as f:
@@ -157,7 +169,7 @@ def main() -> None:
     # stale_margin and a path label computed from receipt_date=None -- i.e. on a
     # system that never runs.
     from mib.cli import corpus_reference_date
-    from mib.features import refresh_temporal
+    from mib.features import adjudicator_feature_allowed, refresh_temporal
     reference = corpus_reference_date([r["record"] for r in rows])
     revoked = corpus_revoked_sponsors([r["record"] for r in rows])
     print(f"staleness reference: {reference}   revoked sponsors: {len(revoked)}")
@@ -170,7 +182,12 @@ def main() -> None:
     print(f"packets: {len(rows)}  note-settled: {len(rows) - len(trainable)}  "
           f"trainable: {len(trainable)}")
 
-    feature_names = sorted({k for r in trainable for k in r["features"]})
+    feature_names = sorted({
+        key
+        for row in trainable
+        for key in row["features"]
+        if adjudicator_feature_allowed(key)
+    })
     X = np.array([[float(r["features"].get(n, 0.0)) for n in feature_names]
                   for r in trainable])
     y = np.array([truth[r["case_id"]] for r in trainable])
@@ -231,6 +248,13 @@ def main() -> None:
     #
     # Blend the learned distribution with the lower-variance policy prior.
     top = max(results, key=lambda k: results[k]["mean"])
+    if args.pin:
+        # Sweep blends for the pinned estimator instead, so the row it names
+        # exists and is measured on this cache like every other row.
+        top = args.pin.partition(":")[0]
+        if top not in CANDIDATES:
+            sys.exit(f"--pin {args.pin}: unknown estimator {top!r}. "
+                     f"Choose from {', '.join(sorted(CANDIDATES))}.")
 
     print()
     for weight in (0.2, 0.35, 0.5, 0.65, 0.8):
@@ -267,12 +291,27 @@ def main() -> None:
         return (weight, -results[name]["mean"])
 
     best_name = min(within, key=rank)
-    best = results[best_name]
-    best_sum = best["mean"]
 
     if len(within) > 1:
         print(f"\nwithin 1 SE of {peak} ({results[peak]['mean']:.2f} "
               f"+/- {results[peak]['se']:.2f}): {', '.join(sorted(within))}")
+
+    if args.pin:
+        estimator, _, weight = args.pin.partition(":")
+        pinned = f"blend{float(weight):.2f}"
+        if pinned not in results or results[pinned]["_blend"][0] != estimator:
+            # Blend rows are computed for the top-ranked estimator only, so a
+            # pin naming a different one has no measured row to stand on.
+            sys.exit(f"--pin {args.pin}: no measured row for {estimator} at "
+                     f"blend {weight}. This run ranked {top} highest; rerun "
+                     f"without --pin to see the table.")
+        if pinned not in within:
+            print(f"[warn] pinned {args.pin} is outside the 1-SE set")
+        print(f"pinned:   {pinned} ({estimator}), overriding {best_name}")
+        best_name = pinned
+
+    best = results[best_name]
+    best_sum = best["mean"]
     print(f"selected: {best_name}  ({best_sum:.2f} vs paths {base_sum:.2f}, "
           f"{best_sum - base_sum:+.2f} on the trainable subset, "
           f"{args.repeats} repeats x {args.folds} folds)")
@@ -319,8 +358,10 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
     """Write predictions using out-of-fold probabilities."""
     import json
     from mib.cli import (_enforce_output_schema, corpus_median_date,
-                         corpus_reference_date, fallback_prediction)
+                         corpus_reference_date, fallback_prediction,
+                         resolve_fallback_sponsors)
     from mib.lexicon import Lexicon
+    from mib.model import decide_with_safety
     from mib.pipeline import finalize, resolve_printed_date
     from mib.policy import corpus_years
 
@@ -360,13 +401,16 @@ def _write_oof_predictions(args, cache, rows, trainable, best_name,
             # Note-settled: decided by rule, no model involved.
             pred = finalize(row["printed"], record, row["note"], calibration)
         else:
-            adjudication, confidence = decide(probs)
+            adjudication, confidence = decide_with_safety(
+                probs, decision_path(record)
+            )
             pred = finalize(row["printed"], record, None, calibration)
             pred.adjudication = adjudication
             pred.confidence = confidence
         out.append(pred.to_row())
 
     _enforce_output_schema(out)
+    resolve_fallback_sponsors(out)
     args.oof_out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.oof_out, "w") as f:
         for row in out:

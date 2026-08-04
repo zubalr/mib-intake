@@ -8,20 +8,21 @@ JSONL prediction per packet. Each prediction contains nine extracted fields,
 an `APPROVED`, `DENIED`, or `NEEDS_REVIEW` decision, and a calibrated
 confidence.
 
-On the public training set the shipped image scores **133.93 / 150**. The
-repeated out-of-fold estimate is **128.53 / 150, SE 0.16**.
+On the public training set the image scores **137.89 / 150**.
 
-| Section | Training set | Out of fold |
-| --- | ---: | ---: |
-| Extraction | 44.16 / 50 | 44.15 / 50 |
-| Classification | 72.69 / 80 | 67.88 / 80 |
-| Calibration | 17.07 / 20 | 16.50 / 20 |
-| Mean confidence Brier | 0.0732 | 0.0874 |
+| Section | Training set |
+| --- | ---: |
+| Extraction | 45.37 / 50 |
+| Classification | 74.45 / 80 |
+| Calibration | 18.07 / 20 |
+| Mean confidence Brier | 0.0482 |
+| Catastrophic false approvals | 12 |
 
-The training-set score is in-sample. The out-of-fold estimate uses repeated
-stratified cross-validation over ten fold assignments, so every held-out
-prediction comes from a model that did not train on that packet; it is the
-figure to use for unseen packets. See [MEMO.md](MEMO.md).
+This score is in-sample: the model was fitted on these packets, so it is a
+reproducibility figure rather than an estimate of performance on unseen ones.
+It is produced by the Docker image itself under the submission constraints, not
+by a cached intermediate. See [MEMO.md](MEMO.md) for the held-out diagnostics
+and their limits.
 
 The final model is trained on document-derived evidence only. It does not
 receive case IDs, filenames, hidden answer text, or any packet-identifying
@@ -48,23 +49,24 @@ The entrypoint accepts:
 <input_pdf_directory> <output_predictions_path>
 ```
 
-Runtime is fully offline. The image uses PyMuPDF, Tesseract, NumPy, and
-scikit-learn. It does not use an LLM, VLM, cloud OCR service, network request,
-or API key.
+Runtime is fully offline. The image uses PyMuPDF, Tesseract, RapidOCR, NumPy,
+and scikit-learn. It does not use an LLM, VLM, cloud OCR service, network
+request, or API key.
 
 ## Design
 
 1. PyMuPDF extracts visible text spans and identifies hidden, transparent, or
    off-crop content.
 2. Tesseract processes pages without a reliable text layer using several page
-   segmentation and orientation strategies.
+   segmentation and orientation strategies. RapidOCR supplies a lower-trust
+   second reading for fields Tesseract could not resolve.
 3. Parsed values carry source provenance and trust ranks based on the field
    manual.
 4. Closed-vocabulary fields use OCR-aware weighted edit distance.
 5. Deterministic policy rules handle high-confidence evidence.
 6. A small calibrated classifier refines probabilities for unresolved cases.
 7. The final decision maximizes expected value under the challenge payoff
-   matrix.
+   matrix, with approval blocked when the packet's risk page is unreadable.
 
 ## Repository layout
 
@@ -82,6 +84,7 @@ or API key.
 | `policy/` | Fitted lexicon, calibration, and model artifacts |
 | `tools/` | Training, validation, and release checks |
 | `tests/` | Unit and end-to-end tests |
+| `APPENDIX.md` | Extended engineering detail behind the memo |
 
 ## Development
 
@@ -117,3 +120,12 @@ PYTHONPATH=. .venv/bin/python tools/train_adjudicator.py \
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Third-party components are used unmodified, as pinned dependencies: Tesseract
+and pytesseract (Apache-2.0); `rapidocr-onnxruntime` (Apache-2.0), which bundles
+the PaddleOCR PP-OCRv4 detection, classification and recognition weights
+(Apache-2.0); the PaddleOCR PP-OCRv6 Small English detection and recognition
+weights (Apache-2.0), redistributed by the RapidOCR project and vendored in
+`policy/` so the runtime stays offline; ONNX Runtime (MIT); OpenCV (Apache-2.0);
+PyMuPDF (AGPL-3.0 or Artifex commercial); Pillow (MIT-CMU); and scikit-learn,
+NumPy and SciPy (BSD-3-Clause).

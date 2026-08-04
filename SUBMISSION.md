@@ -19,34 +19,34 @@ docker run --rm --network none --cpus 4 --memory 8g --read-only --tmpfs /tmp \
 
 ## Public-data results
 
-The shipped Docker image scores **133.93 / 150** on the complete public training
-set under the official evaluator. The repeated out-of-fold estimate is
-**128.53 / 150, SE 0.16**.
+The Docker image scores **137.89 / 150** on the complete public training set
+under the official evaluator.
 
-| Section | Training set | Out of fold |
-| --- | ---: | ---: |
-| Extraction | 44.16 / 50 | 44.15 / 50 |
-| Classification | 72.69 / 80 | 67.88 / 80 |
-| Calibration | 17.07 / 20 | 16.50 / 20 |
-| Total | **133.93 / 150** | **128.53 / 150** |
-| Mean confidence Brier | 0.0732 | 0.0874 |
+| Section | Training set |
+| --- | ---: |
+| Extraction | 45.37 / 50 |
+| Classification | 74.45 / 80 |
+| Calibration | 18.07 / 20 |
+| Total | **137.89 / 150** |
+| Mean confidence Brier | 0.0482 |
+| Catastrophic false approvals | 12 |
 
-The training-set score is in-sample: the model was fitted on those rows. The
-out-of-fold estimate averages ten fold assignments in which every held-out
-prediction comes from a model that did not train on that packet, and it is the
-figure to use for expected performance on unseen packets.
+This is in-sample: the model was fitted on these packets. It is a
+reproducibility figure, not an estimate of performance on unseen packets, and
+it comes from running the image itself under the submission constraints.
 
 ## Approach
 
 The solution combines:
 
 - trust-ranked evidence extraction based on the field manual;
-- local Tesseract OCR for scanned pages;
+- local Tesseract OCR plus a lower-trust RapidOCR fallback for scanned pages;
 - OCR-aware matching for closed-vocabulary fields;
 - structural quarantine of hidden and non-evidentiary text;
 - deterministic rules for high-confidence policy evidence;
 - a compact calibrated classifier for unresolved cases; and
-- expected-value adjudication using the published payoff matrix.
+- expected-value adjudication using the published payoff matrix, with approval
+  blocked when the packet's risk page is unreadable.
 
 The classifier uses document-evidence features only. It does not receive case
 IDs, filenames, hidden answer content, or packet-identifying inputs.
