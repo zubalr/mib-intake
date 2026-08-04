@@ -128,5 +128,4 @@ the PaddleOCR PP-OCRv4 detection, classification and recognition weights
 weights (Apache-2.0), redistributed by the RapidOCR project and vendored in
 `policy/` so the runtime stays offline; ONNX Runtime (MIT); OpenCV (Apache-2.0);
 PyMuPDF (AGPL-3.0 or Artifex commercial); Pillow (MIT-CMU); and scikit-learn,
-NumPy and SciPy (BSD-3-Clause). No source, thresholds, tables, models, or
-predictions from another challenge entrant are used.
+NumPy and SciPy (BSD-3-Clause).
